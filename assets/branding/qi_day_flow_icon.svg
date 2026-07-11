@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Qi Day Flow app icon</title>
+  <desc id="desc">A luminous Q-shaped time flow with clock hands on a dark rounded square.</desc>
+  <defs>
+    <linearGradient id="background" x1="32" y1="20" x2="224" y2="236" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#182A50"/>
+      <stop offset="0.55" stop-color="#101A36"/>
+      <stop offset="1" stop-color="#090E20"/>
+    </linearGradient>
+    <linearGradient id="flow" x1="54" y1="54" x2="207" y2="207" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4DE3FF"/>
+      <stop offset="0.5" stop-color="#4C8DFF"/>
+      <stop offset="1" stop-color="#9A6BFF"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(94 72) rotate(54) scale(158)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4DE3FF" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#4DE3FF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#background)"/>
+  <rect x="9" y="9" width="238" height="238" rx="55" fill="none" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="2"/>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#glow)"/>
+
+  <circle cx="120" cy="116" r="66" fill="#142143" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="2"/>
+  <circle cx="120" cy="116" r="66" fill="none" stroke="url(#flow)" stroke-width="22"/>
+  <path d="M164 160L195 191" fill="none" stroke="url(#flow)" stroke-width="22" stroke-linecap="round"/>
+
+  <path d="M120 116V78" fill="none" stroke="#FFFFFF" stroke-width="13" stroke-linecap="round"/>
+  <path d="M120 116L151 132" fill="none" stroke="#FFFFFF" stroke-width="13" stroke-linecap="round"/>
+  <circle cx="120" cy="116" r="10" fill="#FFFFFF"/>
+</svg>
