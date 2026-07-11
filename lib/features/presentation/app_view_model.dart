@@ -235,11 +235,13 @@ class StatisticsAppViewData {
     required this.name,
     required this.durationMinutes,
     required this.share,
+    this.executablePath,
   });
 
   final String name;
   final double durationMinutes;
   final double share;
+  final String? executablePath;
 }
 
 class StatisticsPeriodViewData {
@@ -278,6 +280,7 @@ class StatisticsViewData {
     this.recentDailyCategoryMinutes = const <DateTime, Map<String, double>>{},
     this.todayMinutes = 0,
     this.dailyGoalHours = 8,
+    this.activeApplicationCount = 0,
   });
 
   final double totalMinutes;
@@ -303,6 +306,7 @@ class StatisticsViewData {
   final Map<DateTime, Map<String, double>> recentDailyCategoryMinutes;
   final double todayMinutes;
   final int dailyGoalHours;
+  final int activeApplicationCount;
 
   double get todayGoalProgress => dailyGoalHours <= 0
       ? 0

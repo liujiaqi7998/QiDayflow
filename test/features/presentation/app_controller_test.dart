@@ -178,6 +178,11 @@ void main() {
       expect(loggingCall.arguments, containsPair('level', 'DEBUG'));
       expect(controller.timelineCards.single.title, '旧标题');
       expect(controller.statistics.weightedProductivity, 50);
+      expect(controller.statistics.activeApplicationCount, 1);
+      expect(
+        controller.statistics.topApps.single.executablePath,
+        r'C:\Apps\Editor.exe',
+      );
       expect(controller.dailyReport, isNull);
 
       await controller.updateTimelineCard(

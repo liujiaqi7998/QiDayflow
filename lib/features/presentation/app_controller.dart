@@ -909,6 +909,7 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
               name: item.name,
               durationMinutes: item.durationMinutes,
               share: item.share,
+              executablePath: item.executablePath,
             ),
           )
           .toList(growable: false),
@@ -926,6 +927,7 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
       recentDailyCategoryMinutes: result.recentDailyCategoryMinutes,
       todayMinutes: result.todayMinutes,
       dailyGoalHours: _dailyGoalHours,
+      activeApplicationCount: result.activeApplicationCount,
     );
     _safeNotify();
   }

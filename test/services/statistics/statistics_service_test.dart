@@ -149,6 +149,38 @@ void main() {
     );
   });
 
+  test(
+    'app ranking keeps a recorded executable path without changing totals',
+    () {
+      final start = DateTime(2026, 7, 10, 9);
+      final result = const StatisticsService().calculate(
+        cards: [
+          _card(
+            start: start.toUtc(),
+            end: start.add(const Duration(hours: 1)).toUtc(),
+            category: '工作',
+            score: 80,
+            appUsages: [
+              AppUsage(
+                name: 'Editor',
+                durationMs: 30 * 60 * 1000,
+                executablePath: r'C:\Apps\Editor.exe',
+              ),
+              AppUsage(name: 'Editor', durationMs: 30 * 60 * 1000),
+            ],
+          ),
+        ],
+        rangeStart: DateTime(2026, 7, 10),
+        rangeEnd: DateTime(2026, 7, 11),
+      );
+
+      expect(result.topApps, hasLength(1));
+      expect(result.topApps.single.durationMinutes, 60);
+      expect(result.topApps.single.executablePath, r'C:\Apps\Editor.exe');
+      expect(result.activeApplicationCount, 1);
+    },
+  );
+
   test('empty ranges return stable zeroed dashboard data', () {
     final result = const StatisticsService().calculate(
       cards: const [],

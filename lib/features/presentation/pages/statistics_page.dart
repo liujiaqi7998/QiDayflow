@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
@@ -18,44 +19,28 @@ class StatisticsPage extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Wrap(
-          alignment: WrapAlignment.spaceBetween,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          spacing: 18,
-          runSpacing: 12,
-          children: [
-            Text('统计', style: Theme.of(context).textTheme.headlineSmall),
-            SegmentedButton<int>(
-              segments: const [
-                ButtonSegment(value: 7, label: Text('近 7 天')),
-                ButtonSegment(value: 30, label: Text('近 30 天')),
-              ],
-              selected: {viewModel.statisticsDays},
-              onSelectionChanged: (values) => runUiAction(
-                context,
-                () => viewModel.setStatisticsDays(values.first),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 18),
+        _StatisticsHeader(viewModel: viewModel),
+        const SizedBox(height: 24),
         Expanded(
           child: ListView(
             padding: const EdgeInsets.only(bottom: 32),
             children: [
               _Metrics(data: data),
               const SizedBox(height: 24),
-              _Section(
-                title: '每日分类时间',
-                subtitle: '活动跨午夜时按实际日期拆分',
-                child: _DailyStackedChart(data: data.dailyCategoryMinutes),
-              ),
-              _Section(
-                title: '每日效率趋势',
-                subtitle: '按当日每段活动时长加权',
-                child: _EfficiencyTrend(
-                  productivity: data.dailyWeightedProductivity,
-                  dailyMinutes: data.dailyMinutes,
+              _ResponsivePair(
+                left: _Section(
+                  key: const ValueKey('daily-category-section'),
+                  title: '每日分类时间',
+                  subtitle: '按实际发生日期堆叠，悬停查看分类明细',
+                  child: _DailyStackedChart(data: data.dailyCategoryMinutes),
+                ),
+                right: _Section(
+                  title: '每日效率趋势',
+                  subtitle: '按当日每段活动时长加权，满分 100',
+                  child: _EfficiencyTrend(
+                    productivity: data.dailyWeightedProductivity,
+                    dailyMinutes: data.dailyMinutes,
+                  ),
                 ),
               ),
               _ResponsivePair(
@@ -72,15 +57,18 @@ class StatisticsPage extends StatelessWidget {
                 ),
               ),
               _Section(
-                title: '24 小时效率热力',
-                subtitle: '跨小时卡片按实际分钟切分，颜色表示加权效率',
+                title: '24 小时分布',
+                subtitle: '按实际分钟拆分到每小时，颜色表示加权效率',
                 child: _HourlyHeatmap(data: data.hourlyEfficiency),
               ),
               _ResponsivePair(
                 left: _Section(
-                  title: '应用使用 Top 10',
-                  subtitle: '应用时长按卡片范围归一化',
-                  child: _ApplicationRanking(data: data.topApps),
+                  title: '应用使用排行',
+                  subtitle: '最多 10 个应用，进度与占比基于本周期应用时长',
+                  child: _ApplicationRanking(
+                    data: data.topApps,
+                    viewModel: viewModel,
+                  ),
                 ),
                 right: _Section(
                   title: '本周 vs 上周',
@@ -100,6 +88,55 @@ class StatisticsPage extends StatelessWidget {
   }
 }
 
+class _StatisticsHeader extends StatelessWidget {
+  const _StatisticsHeader({required this.viewModel});
+
+  final QiDayFlowViewModel viewModel;
+
+  @override
+  Widget build(BuildContext context) {
+    final title = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('统计概览', style: Theme.of(context).textTheme.headlineSmall),
+        const SizedBox(height: 4),
+        Text(
+          '近 ${viewModel.statisticsDays} 天 · 截至今日，按本地日期和实际记录时长统计',
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
+        ),
+      ],
+    );
+    final range = SegmentedButton<int>(
+      segments: const [
+        ButtonSegment(value: 7, label: Text('近 7 天')),
+        ButtonSegment(value: 30, label: Text('近 30 天')),
+      ],
+      selected: {viewModel.statisticsDays},
+      onSelectionChanged: (values) =>
+          runUiAction(context, () => viewModel.setStatisticsDays(values.first)),
+    );
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth < 620) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [title, const SizedBox(height: 16), range],
+          );
+        }
+        return Row(
+          children: [
+            Expanded(child: title),
+            const SizedBox(width: 24),
+            range,
+          ],
+        );
+      },
+    );
+  }
+}
+
 class _Metrics extends StatelessWidget {
   const _Metrics({required this.data});
 
@@ -109,8 +146,10 @@ class _Metrics extends StatelessWidget {
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final columns = constraints.maxWidth >= 960
-            ? 4
+        final columns = constraints.maxWidth >= 1120
+            ? 5
+            : constraints.maxWidth >= 820
+            ? 3
             : constraints.maxWidth >= 560
             ? 2
             : 1;
@@ -144,6 +183,13 @@ class _Metrics extends StatelessWidget {
             ),
             _Metric(
               width: width,
+              icon: Icons.window_outlined,
+              label: '活跃应用',
+              value: '${data.activeApplicationCount} 个',
+              detail: '本周期有使用记录',
+            ),
+            _Metric(
+              width: width,
               icon: Icons.view_timeline_outlined,
               label: '活动数',
               value: '${data.activityCount} 项',
@@ -162,7 +208,7 @@ class _Metric extends StatelessWidget {
     required this.icon,
     required this.label,
     required this.value,
-    required this.comparison,
+    this.comparison,
     this.detail,
   });
 
@@ -170,12 +216,12 @@ class _Metric extends StatelessWidget {
   final IconData icon;
   final String label;
   final String value;
-  final StatisticsMetricComparisonViewData comparison;
+  final StatisticsMetricComparisonViewData? comparison;
   final String? detail;
 
   @override
   Widget build(BuildContext context) {
-    final difference = comparison.difference;
+    final difference = comparison?.difference ?? 0;
     final positive = difference > 0;
     final neutral = difference.abs() < 0.0001;
     final changeColor = neutral
@@ -183,8 +229,10 @@ class _Metric extends StatelessWidget {
         : positive
         ? const Color(0xFF16856D)
         : Theme.of(context).colorScheme.error;
-    final percent = comparison.percentChange;
-    final changeText = neutral
+    final percent = comparison?.percentChange;
+    final changeText = comparison == null
+        ? null
+        : neutral
         ? '与上一周期持平'
         : percent == null
         ? '上一周期为 0，本期新增'
@@ -193,6 +241,8 @@ class _Metric extends StatelessWidget {
       width: width,
       height: 126,
       child: Card(
+        elevation: .5,
+        shadowColor: const Color(0x16000000),
         child: Padding(
           padding: const EdgeInsets.all(15),
           child: Row(
@@ -214,14 +264,14 @@ class _Metric extends StatelessWidget {
                     ),
                     const Spacer(),
                     Text(
-                      detail ?? changeText,
+                      detail ?? changeText ?? '',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
                         color: detail == null ? changeColor : null,
                       ),
                     ),
-                    if (detail != null)
+                    if (detail != null && changeText != null)
                       Text(
                         changeText,
                         maxLines: 1,
@@ -242,7 +292,12 @@ class _Metric extends StatelessWidget {
 }
 
 class _Section extends StatelessWidget {
-  const _Section({required this.title, required this.child, this.subtitle});
+  const _Section({
+    super.key,
+    required this.title,
+    required this.child,
+    this.subtitle,
+  });
 
   final String title;
   final String? subtitle;
@@ -251,25 +306,30 @@ class _Section extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.only(top: 4, bottom: 24),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(title, style: Theme.of(context).textTheme.titleMedium),
-          if (subtitle != null) ...[
-            const SizedBox(height: 3),
-            Text(
-              subtitle!,
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ],
-          const SizedBox(height: 16),
-          child,
-          const SizedBox(height: 20),
-          const Divider(height: 1),
-        ],
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Card(
+        elevation: .5,
+        shadowColor: const Color(0x12000000),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(title, style: Theme.of(context).textTheme.titleMedium),
+              if (subtitle != null) ...[
+                const SizedBox(height: 4),
+                Text(
+                  subtitle!,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 20),
+              child,
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -292,7 +352,7 @@ class _ResponsivePair extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Expanded(child: left),
-            const SizedBox(width: 28),
+            const SizedBox(width: 16),
             Expanded(child: right),
           ],
         );
@@ -301,32 +361,272 @@ class _ResponsivePair extends StatelessWidget {
   }
 }
 
-class _DailyStackedChart extends StatelessWidget {
+class _DailyStackedChart extends StatefulWidget {
   const _DailyStackedChart({required this.data});
 
   final Map<DateTime, Map<String, double>> data;
 
   @override
+  State<_DailyStackedChart> createState() => _DailyStackedChartState();
+}
+
+class _DailyStackedChartState extends State<_DailyStackedChart> {
+  _DailyChartSegment? _hovered;
+  Offset? _pointer;
+
+  @override
   Widget build(BuildContext context) {
-    final entries = data.entries.toList()
+    final entries = widget.data.entries.toList()
       ..sort((left, right) => left.key.compareTo(right.key));
     if (entries.isEmpty) return const _EmptyStat();
-    final width = math.max(620.0, entries.length * 34.0);
     final colors = <String, Color>{
       for (final category in entries.expand((entry) => entry.value.keys))
         category: categoryColor(category, Theme.of(context).brightness),
     };
-    return SizedBox(
-      height: 230,
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: CustomPaint(
-          size: Size(width, 220),
-          painter: _DailyStackedPainter(
-            entries: entries,
-            categoryColors: colors,
-            gridColor: Theme.of(context).colorScheme.outlineVariant,
-            textColor: Theme.of(context).colorScheme.onSurfaceVariant,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text('时长（小时）', style: Theme.of(context).textTheme.labelSmall),
+            Text('日期', style: Theme.of(context).textTheme.labelSmall),
+          ],
+        ),
+        const SizedBox(height: 8),
+        SizedBox(
+          key: const ValueKey('daily-category-chart'),
+          height: 232,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final width = math.max(
+                constraints.maxWidth,
+                entries.length * 34.0 + _dailyChartLeft + _dailyChartRight,
+              );
+              return SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: MouseRegion(
+                  onExit: (_) => _clearHover(),
+                  onHover: (event) => _updateHover(
+                    event.localPosition,
+                    Size(width, 232),
+                    entries,
+                  ),
+                  child: SizedBox(
+                    width: width,
+                    height: 232,
+                    child: Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        Positioned.fill(
+                          child: CustomPaint(
+                            painter: _DailyStackedPainter(
+                              entries: entries,
+                              categoryColors: colors,
+                              gridColor: Theme.of(
+                                context,
+                              ).colorScheme.outlineVariant,
+                              textColor: Theme.of(
+                                context,
+                              ).colorScheme.onSurfaceVariant,
+                              hovered: _hovered,
+                            ),
+                          ),
+                        ),
+                        if (_hovered case final hovered?)
+                          _DailyChartTooltip(
+                            segment: hovered,
+                            pointer: _pointer ?? hovered.rect.center,
+                            chartSize: Size(width, 232),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _updateHover(
+    Offset position,
+    Size size,
+    List<MapEntry<DateTime, Map<String, double>>> entries,
+  ) {
+    final hit = _dailyChartSegments(
+      entries,
+      size,
+    ).where((segment) => segment.rect.contains(position)).firstOrNull;
+    if (hit == _hovered && _pointer == position) return;
+    setState(() {
+      _hovered = hit;
+      _pointer = hit == null ? null : position;
+    });
+  }
+
+  void _clearHover() {
+    if (_hovered == null && _pointer == null) return;
+    setState(() {
+      _hovered = null;
+      _pointer = null;
+    });
+  }
+}
+
+const _dailyChartLeft = 44.0;
+const _dailyChartRight = 12.0;
+const _dailyChartTop = 12.0;
+const _dailyChartBottom = 32.0;
+
+final class _DailyChartSegment {
+  const _DailyChartSegment({
+    required this.day,
+    required this.category,
+    required this.minutes,
+    required this.dayTotal,
+    required this.rect,
+  });
+
+  final DateTime day;
+  final String category;
+  final double minutes;
+  final double dayTotal;
+  final Rect rect;
+
+  double get share => dayTotal <= 0 ? 0 : (minutes / dayTotal).clamp(0, 1);
+
+  @override
+  bool operator ==(Object other) =>
+      other is _DailyChartSegment &&
+      day == other.day &&
+      category == other.category &&
+      rect == other.rect;
+
+  @override
+  int get hashCode => Object.hash(day, category, rect);
+}
+
+List<_DailyChartSegment> _dailyChartSegments(
+  List<MapEntry<DateTime, Map<String, double>>> entries,
+  Size size,
+) {
+  if (entries.isEmpty) return const [];
+  final chartHeight = math.max(
+    0.0,
+    size.height - _dailyChartTop - _dailyChartBottom,
+  );
+  final plotWidth = math.max(
+    0.0,
+    size.width - _dailyChartLeft - _dailyChartRight,
+  );
+  final totals = entries
+      .map(
+        (entry) => entry.value.values.fold<double>(
+          0,
+          (sum, value) => value.isFinite && value > 0 ? sum + value : sum,
+        ),
+      )
+      .toList(growable: false);
+  final maxValue = totals.fold<double>(0, math.max);
+  if (maxValue <= 0 || plotWidth <= 0 || chartHeight <= 0) return const [];
+  final slot = plotWidth / entries.length;
+  final barWidth = math.min(24.0, slot * .62);
+  final segments = <_DailyChartSegment>[];
+  for (var index = 0; index < entries.length; index++) {
+    var y = _dailyChartTop + chartHeight;
+    final categories = entries[index].value.entries.toList()
+      ..sort((left, right) => left.key.compareTo(right.key));
+    for (final category in categories) {
+      final minutes = category.value;
+      if (!minutes.isFinite || minutes <= 0) continue;
+      final height = minutes / maxValue * chartHeight;
+      final rect = Rect.fromLTWH(
+        _dailyChartLeft + slot * index + (slot - barWidth) / 2,
+        y - height,
+        barWidth,
+        height,
+      );
+      segments.add(
+        _DailyChartSegment(
+          day: entries[index].key,
+          category: category.key,
+          minutes: minutes,
+          dayTotal: totals[index],
+          rect: rect,
+        ),
+      );
+      y -= height;
+    }
+  }
+  return segments;
+}
+
+class _DailyChartTooltip extends StatelessWidget {
+  const _DailyChartTooltip({
+    required this.segment,
+    required this.pointer,
+    required this.chartSize,
+  });
+
+  final _DailyChartSegment segment;
+  final Offset pointer;
+  final Size chartSize;
+
+  @override
+  Widget build(BuildContext context) {
+    final width = math.max(0.0, math.min(190.0, chartSize.width - 8));
+    const height = 66.0;
+    final maxLeft = math.max(4.0, chartSize.width - width - 4);
+    final left = (pointer.dx + 12).clamp(4.0, maxLeft);
+    final top = (pointer.dy - height - 10).clamp(
+      4.0,
+      chartSize.height - height - 4,
+    );
+    final day = segment.day;
+    return Positioned(
+      left: left,
+      top: top,
+      width: width,
+      child: IgnorePointer(
+        child: Container(
+          key: const ValueKey('daily-category-tooltip'),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.inverseSurface,
+            borderRadius: BorderRadius.circular(6),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x22000000),
+                blurRadius: 10,
+                offset: Offset(0, 3),
+              ),
+            ],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                '${day.year}年${day.month}月${day.day}日 · ${segment.category}',
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.onInverseSurface,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 12,
+                ),
+              ),
+              const SizedBox(height: 3),
+              Text(
+                '${formatMinutes(segment.minutes)} · '
+                '当日 ${(segment.share * 100).toStringAsFixed(0)}%',
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.onInverseSurface,
+                  fontSize: 12,
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -340,20 +640,27 @@ class _DailyStackedPainter extends CustomPainter {
     required this.categoryColors,
     required this.gridColor,
     required this.textColor,
+    required this.hovered,
   });
 
   final List<MapEntry<DateTime, Map<String, double>>> entries;
   final Map<String, Color> categoryColors;
   final Color gridColor;
   final Color textColor;
+  final _DailyChartSegment? hovered;
 
   @override
   void paint(Canvas canvas, Size size) {
-    const top = 10.0;
-    const bottom = 28.0;
+    const top = _dailyChartTop;
+    const bottom = _dailyChartBottom;
     final chartHeight = size.height - top - bottom;
     final totals = entries
-        .map((entry) => entry.value.values.fold<double>(0, (a, b) => a + b))
+        .map(
+          (entry) => entry.value.values.fold<double>(
+            0,
+            (sum, value) => value.isFinite && value > 0 ? sum + value : sum,
+          ),
+        )
         .toList(growable: false);
     final maxValue = totals.fold<double>(0, math.max);
     final gridPaint = Paint()
@@ -361,34 +668,48 @@ class _DailyStackedPainter extends CustomPainter {
       ..strokeWidth = 1;
     for (var line = 0; line <= 4; line++) {
       final y = top + chartHeight * line / 4;
-      canvas.drawLine(Offset(0, y), Offset(size.width, y), gridPaint);
+      canvas.drawLine(
+        Offset(_dailyChartLeft, y),
+        Offset(size.width - _dailyChartRight, y),
+        gridPaint,
+      );
+      final value = maxValue * (4 - line) / 4 / 60;
+      final label = TextPainter(
+        text: TextSpan(
+          text: value.toStringAsFixed(value >= 10 ? 0 : 1),
+          style: TextStyle(color: textColor, fontSize: 9),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      label.paint(
+        canvas,
+        Offset(_dailyChartLeft - label.width - 6, y - label.height / 2),
+      );
     }
-    final slot = size.width / entries.length;
-    final barWidth = math.min(22.0, slot * 0.65);
+    final plotWidth = size.width - _dailyChartLeft - _dailyChartRight;
+    final slot = plotWidth / entries.length;
     final labelEvery = math.max(1, (entries.length / 8).ceil());
-    for (var index = 0; index < entries.length; index++) {
-      var y = top + chartHeight;
-      final sorted = entries[index].value.entries.toList()
-        ..sort((left, right) => left.key.compareTo(right.key));
-      for (final category in sorted) {
-        final height = maxValue <= 0
-            ? 0.0
-            : category.value / maxValue * chartHeight;
-        final rect = RRect.fromRectAndRadius(
-          Rect.fromLTWH(
-            slot * index + (slot - barWidth) / 2,
-            y - height,
-            barWidth,
-            height,
-          ),
-          const Radius.circular(2),
-        );
+    for (final segment in _dailyChartSegments(entries, size)) {
+      final rect = RRect.fromRectAndRadius(
+        segment.rect,
+        const Radius.circular(2),
+      );
+      final isHovered = hovered == segment;
+      canvas.drawRRect(
+        rect,
+        Paint()..color = categoryColors[segment.category] ?? textColor,
+      );
+      if (isHovered) {
         canvas.drawRRect(
           rect,
-          Paint()..color = categoryColors[category.key] ?? textColor,
+          Paint()
+            ..color = Colors.white.withValues(alpha: .55)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 2,
         );
-        y -= height;
       }
+    }
+    for (var index = 0; index < entries.length; index++) {
       if (index % labelEvery == 0 || index == entries.length - 1) {
         final day = entries[index].key;
         final painter = TextPainter(
@@ -400,7 +721,10 @@ class _DailyStackedPainter extends CustomPainter {
         )..layout();
         painter.paint(
           canvas,
-          Offset(slot * (index + 0.5) - painter.width / 2, size.height - 18),
+          Offset(
+            _dailyChartLeft + slot * (index + 0.5) - painter.width / 2,
+            size.height - 18,
+          ),
         );
       }
     }
@@ -410,7 +734,8 @@ class _DailyStackedPainter extends CustomPainter {
   bool shouldRepaint(covariant _DailyStackedPainter oldDelegate) =>
       oldDelegate.entries != entries ||
       oldDelegate.gridColor != gridColor ||
-      oldDelegate.textColor != textColor;
+      oldDelegate.textColor != textColor ||
+      oldDelegate.hovered != hovered;
 }
 
 class _EfficiencyTrend extends StatelessWidget {
@@ -776,53 +1101,169 @@ class _HourlyHeatmap extends StatelessWidget {
   }
 }
 
-class _ApplicationRanking extends StatelessWidget {
-  const _ApplicationRanking({required this.data});
+class _ApplicationRanking extends StatefulWidget {
+  const _ApplicationRanking({required this.data, required this.viewModel});
 
   final List<StatisticsAppViewData> data;
+  final QiDayFlowViewModel viewModel;
+
+  @override
+  State<_ApplicationRanking> createState() => _ApplicationRankingState();
+}
+
+class _ApplicationRankingState extends State<_ApplicationRanking> {
+  final Map<String, Future<Uint8List?>> _icons = {};
+
+  @override
+  void didUpdateWidget(covariant _ApplicationRanking oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.viewModel != widget.viewModel) _icons.clear();
+  }
 
   @override
   Widget build(BuildContext context) {
-    if (data.isEmpty) return const _EmptyStat();
-    final maxValue = data.first.durationMinutes;
+    if (widget.data.isEmpty) return const _EmptyStat();
     return Column(
       children: [
-        for (var index = 0; index < data.length; index++)
+        for (var index = 0; index < widget.data.length; index++)
           Padding(
-            padding: const EdgeInsets.symmetric(vertical: 5),
-            child: Row(
-              children: [
-                SizedBox(width: 24, child: Text('${index + 1}')),
-                Expanded(
-                  flex: 2,
-                  child: Text(
-                    data[index].name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+            padding: const EdgeInsets.symmetric(vertical: 7),
+            child: SizedBox(
+              height: 48,
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 22,
+                    child: Text(
+                      '${index + 1}',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
                   ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  flex: 3,
-                  child: LinearProgressIndicator(
-                    minHeight: 8,
-                    value: maxValue <= 0
-                        ? 0
-                        : data[index].durationMinutes / maxValue,
+                  _icon(widget.data[index]),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                widget.data[index].name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: Theme.of(context).textTheme.labelLarge,
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Text(
+                              formatMinutes(widget.data[index].durationMinutes),
+                              textAlign: TextAlign.right,
+                            ),
+                            const SizedBox(width: 10),
+                            SizedBox(
+                              width: 38,
+                              child: Text(
+                                '${(_safeShare(widget.data[index].share) * 100).toStringAsFixed(0)}%',
+                                textAlign: TextAlign.right,
+                                style: Theme.of(context).textTheme.bodySmall
+                                    ?.copyWith(
+                                      color: Theme.of(
+                                        context,
+                                      ).colorScheme.onSurfaceVariant,
+                                    ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(3),
+                          child: LinearProgressIndicator(
+                            minHeight: 5,
+                            value: _safeShare(widget.data[index].share),
+                            backgroundColor: Theme.of(
+                              context,
+                            ).colorScheme.surfaceContainerHighest,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-                const SizedBox(width: 10),
-                SizedBox(
-                  width: 76,
-                  child: Text(
-                    formatMinutes(data[index].durationMinutes),
-                    textAlign: TextAlign.right,
-                  ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
       ],
+    );
+  }
+
+  Widget _icon(StatisticsAppViewData app) {
+    final path = app.executablePath?.trim();
+    if (path == null || path.isEmpty) return _fallback(app.name);
+    final future = _icons.putIfAbsent(path, () => _loadIcon(path));
+    return FutureBuilder<Uint8List?>(
+      future: future,
+      builder: (context, snapshot) {
+        final bytes = snapshot.data;
+        if (bytes == null) return _fallback(app.name);
+        return _ApplicationIconFrame(
+          child: Image.memory(
+            bytes,
+            key: ValueKey('statistics-app-icon-${app.name}'),
+            width: 28,
+            height: 28,
+            fit: BoxFit.contain,
+            gaplessPlayback: true,
+            errorBuilder: (_, _, _) => _fallback(app.name),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<Uint8List?> _loadIcon(String path) async {
+    try {
+      return await widget.viewModel.loadApplicationIcon(path);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Widget _fallback(String name) => _ApplicationIconFrame(
+    key: ValueKey('statistics-app-icon-fallback-$name'),
+    child: const Icon(Icons.apps_outlined, size: 21),
+  );
+
+  static double _safeShare(double value) =>
+      value.isFinite ? value.clamp(0, 1).toDouble() : 0;
+}
+
+class _ApplicationIconFrame extends StatelessWidget {
+  const _ApplicationIconFrame({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      image: true,
+      child: Container(
+        width: 36,
+        height: 36,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(
+            color: Theme.of(context).colorScheme.outlineVariant,
+          ),
+        ),
+        child: child,
+      ),
     );
   }
 }

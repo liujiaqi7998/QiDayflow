@@ -51,11 +51,13 @@ final class AppUsageStatistics {
     required this.name,
     required this.durationMinutes,
     required this.share,
+    this.executablePath,
   });
 
   final String name;
   final double durationMinutes;
   final double share;
+  final String? executablePath;
 }
 
 final class ActivityStatistics {
@@ -72,6 +74,7 @@ final class ActivityStatistics {
     required this.weeklyCategoryDifference,
     required this.recentDailyCategoryMinutes,
     required this.todayMinutes,
+    required this.activeApplicationCount,
   });
 
   final PeriodStatistics current;
@@ -86,6 +89,7 @@ final class ActivityStatistics {
   final Map<String, double> weeklyCategoryDifference;
   final Map<DateTime, Map<String, double>> recentDailyCategoryMinutes;
   final double todayMinutes;
+  final int activeApplicationCount;
 
   double get totalMinutes => current.totalMinutes;
   double get weightedProductivity => current.weightedProductivity;
@@ -154,6 +158,7 @@ final class StatisticsService {
     final hourlyWeightedScore = List<double>.filled(24, 0);
     final appDurationMs = <String, int>{};
     final appDisplayNames = <String, String>{};
+    final appExecutablePaths = <String, String>{};
 
     final current = _summarize(
       cards,
@@ -180,6 +185,7 @@ final class StatisticsService {
           clippedDurationMs: segmentEndMs - segmentStartMs,
           durationTarget: appDurationMs,
           displayNames: appDisplayNames,
+          executablePaths: appExecutablePaths,
         );
       },
     );
@@ -251,6 +257,7 @@ final class StatisticsService {
                 name: appDisplayNames[entry.key]!,
                 durationMinutes: entry.value / Duration.millisecondsPerMinute,
                 share: appTotalMs == 0 ? 0 : entry.value / appTotalMs,
+                executablePath: appExecutablePaths[entry.key],
               ),
             )
             .toList()
@@ -304,6 +311,7 @@ final class StatisticsService {
             return sum + value;
           }) /
           Duration.millisecondsPerMinute,
+      activeApplicationCount: appDurationMs.length,
     );
   }
 
@@ -431,19 +439,28 @@ final class StatisticsService {
     required int clippedDurationMs,
     required Map<String, int> durationTarget,
     required Map<String, String> displayNames,
+    required Map<String, String> executablePaths,
   }) {
     if (card.appUsages.isEmpty || clippedDurationMs <= 0) return;
     final fullDurationMs = card.durationMs;
     if (fullDurationMs <= 0) return;
     final clippedScale = clippedDurationMs / fullDurationMs;
-    final scaled = <({String name, String key, double durationMs})>[];
+    final scaled =
+        <
+          ({String name, String key, double durationMs, String? executablePath})
+        >[];
     var scaledTotal = 0.0;
     for (final usage in card.appUsages) {
       if (usage.durationMs <= 0) continue;
       final duration = usage.durationMs * clippedScale;
       final key = usage.name.trim().toLowerCase();
       if (key.isEmpty) continue;
-      scaled.add((name: usage.name, key: key, durationMs: duration));
+      scaled.add((
+        name: usage.name,
+        key: key,
+        durationMs: duration,
+        executablePath: usage.executablePath,
+      ));
       scaledTotal += duration;
     }
     if (scaledTotal <= 0) return;
@@ -456,6 +473,10 @@ final class StatisticsService {
       );
       if (normalizedDuration <= 0) continue;
       displayNames.putIfAbsent(usage.key, () => usage.name);
+      final executablePath = usage.executablePath;
+      if (executablePath != null) {
+        executablePaths.putIfAbsent(usage.key, () => executablePath);
+      }
       durationTarget.update(
         usage.key,
         (value) => value + normalizedDuration,
