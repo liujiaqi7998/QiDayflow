@@ -1,0 +1,96 @@
+# Dart and Flutter
+.dart_tool/
+.flutter_tool_state
+.packages
+.pub/
+.pub-cache/
+.flutter-plugins
+.flutter-plugins-dependencies
+**/doc/api/
+**/ios/Flutter/.last_build_id
+/build/
+/coverage/
+
+# Generated Windows and CMake files
+windows/flutter/ephemeral/
+**/CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+*.sln
+*.slnx
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+
+# IDEs and editors
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.vs/
+.history/
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.cer
+*.crt
+*.jks
+*.keystore
+local.properties
+
+# Qi Day Flow runtime data (including a custom data directory inside the repo)
+**/captures/
+**/logs/
+**/qi_day_flow.db
+**/qi_day_flow.db-*
+*.db-wal
+*.db-shm
+*.db.migrating.*
+.qi_day_flow_data_location.*.json
+.qi_day_flow_data_location.*.json.tmp.*
+.qi_day_flow_database_migration.json
+*.partial.mp4
+chunk_*.mp4
+chunk_*.json
+qi_day_flow.log*
+native-capture.log*
+
+# Test and diagnostic output
+/test-results/
+/screenshots/
+*.dmp
+*.stackdump
+*.trace
+*.lcov
+
+# Miscellaneous build caches
+*.class
+*.pyc
+.build/
+.buildlog/
+.swiftpm/
+migrate_working_dir/

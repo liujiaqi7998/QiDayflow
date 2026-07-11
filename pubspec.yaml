@@ -1,0 +1,22 @@
+name: qi_day_flow
+description: "Windows 本地优先的 AI 屏幕活动时间流。"
+publish_to: "none"
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.6.0
+  path: ^1.9.1
+  sqflite_common_ffi: ^2.4.0+2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
