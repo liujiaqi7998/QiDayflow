@@ -93,6 +93,27 @@ cmake --build build\windows\x64 --config Debug --target `
 
 然后运行 `build\windows\x64\runner\Debug\` 下对应的测试程序。
 
+## 自动发布
+
+推送任意 Git tag 会触发 `.github/workflows/release.yml`。流水线在
+`windows-2022` runner 上完成格式检查、静态分析、Flutter 测试、四组原生回归测试和
+Windows x64 Release 构建，然后：
+
+- 打包完整运行目录为 `QiDayFlow-<tag>-windows-x64.zip`；
+- 生成对应的 `.zip.sha256` 校验文件；
+- 将二者保存为 GitHub Actions artifact；
+- 创建同名 GitHub Release，并自动生成发布说明；
+- tag 名包含 `-` 时，将 Release 标记为 prerelease。
+
+例如：
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+发布工作流只使用 GitHub 自动提供的 `GITHUB_TOKEN`，不需要额外配置仓库密钥。
+
 ## 数据目录
 
 默认数据目录：
