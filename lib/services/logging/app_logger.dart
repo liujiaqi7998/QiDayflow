@@ -38,6 +38,7 @@ final class AppLogger {
   bool _closed = false;
 
   String get logDirectory => _logDirectory;
+  bool get isClosed => _closed;
 
   bool isEnabled(AppLogLevel value) => value.index >= level.index;
 

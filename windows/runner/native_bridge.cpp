@@ -1187,19 +1187,64 @@ void NativeBridge::NotifyTrayCommand(TrayCaptureCommand command) {
 }
 
 void NativeBridge::Shutdown() {
+  ShutdownAsync(nullptr);
+  if (shutdown_thread_.joinable() &&
+      shutdown_thread_.get_id() != std::this_thread::get_id()) {
+    shutdown_thread_.join();
+  }
+}
+
+bool NativeBridge::ShutdownAsync(std::function<void()> completion) {
+  bool complete_immediately = false;
+  bool already_shutting_down = false;
   {
     std::lock_guard<std::mutex> lock(event_mutex_);
     if (shutting_down_) {
-      return;
+      already_shutting_down = true;
+      if (completion) {
+        if (shutdown_complete_) {
+          complete_immediately = true;
+        } else {
+          shutdown_completions_.push_back(std::move(completion));
+        }
+      }
+    } else {
+      shutting_down_ = true;
+      if (completion) {
+        shutdown_completions_.push_back(std::move(completion));
+      }
+      update_tray_capture_state_ = nullptr;
+      show_window_ = nullptr;
+      hide_window_ = nullptr;
+      request_exit_ = nullptr;
+      pending_events_.clear();
     }
-    shutting_down_ = true;
-    update_tray_capture_state_ = nullptr;
   }
-  capture_service_.Shutdown();
-  frame_logger_.Close();
+  if (already_shutting_down) {
+    if (complete_immediately) completion();
+    return false;
+  }
   event_sink_.reset();
-  std::lock_guard<std::mutex> lock(event_mutex_);
-  pending_events_.clear();
+  if (method_channel_) {
+    method_channel_->SetMethodCallHandler(nullptr);
+  }
+  if (event_channel_) {
+    event_channel_->SetStreamHandler(nullptr);
+  }
+  shutdown_thread_ = std::thread([this]() {
+    capture_service_.Shutdown();
+    frame_logger_.Close();
+    std::vector<std::function<void()>> completions;
+    {
+      std::lock_guard<std::mutex> lock(event_mutex_);
+      shutdown_complete_ = true;
+      completions.swap(shutdown_completions_);
+    }
+    for (const auto& callback : completions) {
+      callback();
+    }
+  });
+  return true;
 }
 
 void NativeBridge::HandleMethodCall(
@@ -1301,6 +1346,48 @@ void NativeBridge::HandleMethodCall(
       return;
     }
     result->Success(EncodableValue(enabled));
+    return;
+  }
+
+  if (method == "queryApplicationVersion") {
+    if (call.arguments() != nullptr && !call.arguments()->IsNull()) {
+      result->Error("invalid_arguments",
+                    "queryApplicationVersion does not accept arguments");
+      return;
+    }
+    result->Success(EncodableValue(std::string(FLUTTER_VERSION)));
+    return;
+  }
+
+  if (method == "openExternalUrl") {
+    const EncodableValue* url_value = Find(arguments, "url");
+    if (arguments == nullptr || arguments->size() != 1 ||
+        url_value == nullptr ||
+        !std::holds_alternative<std::string>(*url_value)) {
+      result->Error("invalid_arguments",
+                    "openExternalUrl requires one string url field");
+      return;
+    }
+    const std::string& url = std::get<std::string>(*url_value);
+    if (url.find('\0') != std::string::npos || url.rfind("https://", 0) != 0) {
+      result->Error("invalid_url", "Only HTTPS URLs may be opened");
+      return;
+    }
+    const std::wstring wide_url = WideFromUtf8(url);
+    if (wide_url.empty()) {
+      result->Error("invalid_url", "URL must be valid non-empty UTF-8");
+      return;
+    }
+    const HINSTANCE shell_result =
+        ShellExecuteW(window_, L"open", wide_url.c_str(), nullptr, nullptr,
+                      SW_SHOWNORMAL);
+    const INT_PTR shell_code = reinterpret_cast<INT_PTR>(shell_result);
+    if (shell_code <= 32) {
+      result->Error("url_open_failed", "The URL could not be opened",
+                    EncodableValue(static_cast<int64_t>(shell_code)));
+      return;
+    }
+    result->Success(EncodableValue(true));
     return;
   }
 
@@ -1703,8 +1790,8 @@ void NativeBridge::HandleMethodCall(
     return;
   }
   if (method == "shutdown") {
-    Shutdown();
     result->Success();
+    ShutdownAsync(nullptr);
     return;
   }
 

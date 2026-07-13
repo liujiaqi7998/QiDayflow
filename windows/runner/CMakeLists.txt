@@ -15,6 +15,8 @@ add_executable(${BINARY_NAME} WIN32
   "capture_service.h"
   "frame_similarity.cpp"
   "frame_similarity.h"
+  "exit_lifecycle.cpp"
+  "exit_lifecycle.h"
   "flutter_window.cpp"
   "main.cpp"
   "native_bridge.cpp"
@@ -140,6 +142,16 @@ apply_standard_settings(qi_day_flow_startup_behavior_test)
 target_compile_options(qi_day_flow_startup_behavior_test PRIVATE /FS /utf-8)
 add_test(NAME qi_day_flow_startup_behavior_test
   COMMAND qi_day_flow_startup_behavior_test)
+
+add_executable(qi_day_flow_exit_lifecycle_test EXCLUDE_FROM_ALL
+  "exit_lifecycle.cpp"
+  "exit_lifecycle.h"
+  "exit_lifecycle_test.cpp"
+)
+apply_standard_settings(qi_day_flow_exit_lifecycle_test)
+target_compile_options(qi_day_flow_exit_lifecycle_test PRIVATE /FS /utf-8)
+add_test(NAME qi_day_flow_exit_lifecycle_test
+  COMMAND qi_day_flow_exit_lifecycle_test)
 
 # Run the Flutter tool portions of the build. This must not be removed.
 add_dependencies(${BINARY_NAME} flutter_assemble)

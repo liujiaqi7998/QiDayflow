@@ -413,6 +413,95 @@ void main() {
       _throwsKind(AnalysisFailureKind.configuration),
     );
   });
+
+  group('configured attempts', () {
+    test('a retryable operation may succeed on the fourth attempt', () async {
+      final transport = _FakeTransport();
+      for (var attempt = 0; attempt < 3; attempt++) {
+        transport.enqueue(
+          const AnalysisException(
+            AnalysisFailureKind.timeout,
+            'retryable timeout',
+            retryable: true,
+          ),
+        );
+      }
+      transport.enqueue(
+        _chatResponse(
+          '{"observations":[{"start_ts":0,"end_ts":60,"text":"完成分析"}]}',
+        ),
+      );
+      final service = _serviceWithAttempts(transport, 4);
+
+      final result = await service.analyzeChunk(_chunkInput());
+
+      expect(result.single.text, '完成分析');
+      expect(transport.requests, hasLength(4));
+    });
+
+    test('a non-retryable failure is attempted only once', () async {
+      final transport = _FakeTransport()
+        ..enqueue(
+          const AnalysisException(
+            AnalysisFailureKind.http,
+            'bad request',
+            statusCode: 400,
+          ),
+        );
+      final service = _serviceWithAttempts(transport, 4);
+
+      await expectLater(
+        service.analyzeChunk(_chunkInput()),
+        _throwsKind(AnalysisFailureKind.http),
+      );
+      expect(transport.requests, hasLength(1));
+    });
+
+    test('an unclassified transport error is not retried', () async {
+      final transport = _FakeTransport()..enqueue(StateError('client closed'));
+      final service = _serviceWithAttempts(transport, 4);
+
+      await expectLater(
+        service.analyzeChunk(_chunkInput()),
+        throwsA(
+          isA<AnalysisException>()
+              .having(
+                (error) => error.kind,
+                'kind',
+                AnalysisFailureKind.network,
+              )
+              .having((error) => error.retryable, 'retryable', isFalse),
+        ),
+      );
+      expect(transport.requests, hasLength(1));
+    });
+
+    test('zero retries maps to one attempt', () async {
+      final transport = _FakeTransport()
+        ..enqueue(
+          const AnalysisException(
+            AnalysisFailureKind.timeout,
+            'retryable timeout',
+            retryable: true,
+          ),
+        );
+      final service = _serviceWithAttempts(transport, 1);
+
+      await expectLater(
+        service.analyzeChunk(_chunkInput()),
+        _throwsKind(AnalysisFailureKind.timeout),
+      );
+      expect(transport.requests, hasLength(1));
+    });
+
+    test('configuration accepts six attempts but rejects seven', () {
+      expect(() => _serviceWithAttempts(_FakeTransport(), 6), returnsNormally);
+      expect(
+        () => _serviceWithAttempts(_FakeTransport(), 7),
+        _throwsKind(AnalysisFailureKind.configuration),
+      );
+    });
+  });
 }
 
 OpenAiAnalysisService _service(_FakeTransport transport) =>
@@ -424,6 +513,20 @@ OpenAiAnalysisService _service(_FakeTransport transport) =>
       ),
       transport: transport,
     );
+
+OpenAiAnalysisService _serviceWithAttempts(
+  _FakeTransport transport,
+  int maxAttempts,
+) => OpenAiAnalysisService(
+  config: OpenAiAnalysisConfig(
+    baseUrl: 'https://api.example.com/v1/',
+    apiKey: 'secret',
+    model: 'vision-model',
+    maxAttempts: maxAttempts,
+    retryBaseDelay: Duration.zero,
+  ),
+  transport: transport,
+);
 
 AnalysisChunkInput _chunkInput() => AnalysisChunkInput(
   chunkId: 'chunk-1',

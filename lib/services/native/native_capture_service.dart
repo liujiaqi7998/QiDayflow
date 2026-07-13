@@ -503,6 +503,29 @@ class NativeCaptureService {
     return value;
   }
 
+  Future<String> queryApplicationVersion() async {
+    final value = await _methods.invokeMethod<Object?>(
+      'queryApplicationVersion',
+    );
+    if (value is! String || value.trim().isEmpty) {
+      throw const FormatException('queryApplicationVersion 必须返回非空字符串');
+    }
+    return value.trim();
+  }
+
+  Future<bool> openExternalUrl(Uri uri) async {
+    if (uri.scheme != 'https' || uri.host.isEmpty || uri.userInfo.isNotEmpty) {
+      throw ArgumentError.value(uri, 'uri', '只允许打开无凭据的 HTTPS URL');
+    }
+    final value = await _methods.invokeMethod<Object?>('openExternalUrl', {
+      'url': uri.toString(),
+    });
+    if (value is! bool) {
+      throw const FormatException('openExternalUrl 必须返回布尔值');
+    }
+    return value;
+  }
+
   Future<void> setLaunchAtLogin(bool enabled) => _methods.invokeMethod<void>(
     'setLaunchAtLogin',
     <String, Object>{'enabled': enabled},

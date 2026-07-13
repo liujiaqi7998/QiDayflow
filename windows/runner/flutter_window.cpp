@@ -95,6 +95,11 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     return 0;
   }
 
+  if (message == kShutdownCompleteMessage) {
+    FinalizeApplicationExit();
+    return 0;
+  }
+
   if (taskbar_created_message_ != 0 &&
       message == taskbar_created_message_) {
     tray_icon_added_ = false;
@@ -222,7 +227,8 @@ void FlutterWindow::RemoveTrayIcon() {
 }
 
 void FlutterWindow::ShowTrayMenu() {
-  if (GetHandle() == nullptr || exit_requested_ || exit_allowed_) {
+  if (GetHandle() == nullptr || exit_lifecycle_.exit_requested() ||
+      exit_allowed_) {
     return;
   }
   HMENU menu = CreatePopupMenu();
@@ -263,15 +269,16 @@ void FlutterWindow::ShowTrayMenu() {
 
 void FlutterWindow::UpdateTrayCaptureState(
     qi_day_flow::TrayCaptureState state) {
-  if (GetHandle() == nullptr || exit_requested_ || exit_allowed_) {
+  if (GetHandle() == nullptr || exit_lifecycle_.exit_requested() ||
+      exit_allowed_) {
     return;
   }
   tray_capture_state_ = state;
 }
 
 void FlutterWindow::QueueTrayCaptureCommand() {
-  if (GetHandle() == nullptr || exit_requested_ || exit_allowed_ ||
-      !native_bridge_) {
+  if (GetHandle() == nullptr || exit_lifecycle_.exit_requested() ||
+      exit_allowed_ || !native_bridge_) {
     return;
   }
   const qi_day_flow::TrayCaptureMenuItem item =
@@ -298,29 +305,45 @@ void FlutterWindow::HideApplicationWindow() {
 }
 
 void FlutterWindow::RequestApplicationExit() {
-  if (exit_requested_ || exit_allowed_) {
+  if (exit_allowed_ || !exit_lifecycle_.RequestExit()) {
     return;
   }
-  exit_requested_ = true;
   if (native_bridge_) {
     native_bridge_->NotifyExitRequested();
-    SetTimer(GetHandle(), kExitFallbackTimer, 5000, nullptr);
+    SetTimer(GetHandle(), kExitFallbackTimer,
+             static_cast<UINT>(
+                 qi_day_flow::kExitFallbackTimeout.count()),
+             nullptr);
   } else {
     CompleteApplicationExit();
   }
 }
 
 void FlutterWindow::CompleteApplicationExit() {
-  if (exit_allowed_) {
+  if (exit_allowed_ || !exit_lifecycle_.BeginShutdown()) {
     return;
   }
-  exit_allowed_ = true;
   if (GetHandle() != nullptr) {
     KillTimer(GetHandle(), kExitFallbackTimer);
   }
   if (native_bridge_) {
-    native_bridge_->Shutdown();
+    const HWND window = GetHandle();
+    native_bridge_->ShutdownAsync([window]() {
+      if (window != nullptr) {
+        static_cast<void>(
+            PostMessageW(window, kShutdownCompleteMessage, 0, 0));
+      }
+    });
+    return;
   }
+  FinalizeApplicationExit();
+}
+
+void FlutterWindow::FinalizeApplicationExit() {
+  if (!exit_lifecycle_.CompleteShutdown()) {
+    return;
+  }
+  exit_allowed_ = true;
   if (GetHandle() != nullptr) {
     DestroyWindow(GetHandle());
   }

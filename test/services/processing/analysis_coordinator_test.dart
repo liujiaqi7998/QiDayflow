@@ -307,6 +307,303 @@ void main() {
     expect(changesWhileBlocked, 1);
     expect(changes, 2);
   });
+
+  test('retry backlog is paged and cannot starve fresh pending work', () async {
+    final repository = _SchedulingRepository(retryCount: 101);
+    final coordinator = AnalysisCoordinator(
+      captureRepository: repository,
+      analysisRepository: repository,
+      timelineRepository: repository,
+      evidenceReader: const _EmptyEvidenceReader(),
+      serviceFactory: () async => throw StateError('expected test failure'),
+    );
+
+    await coordinator.retryFailed();
+    await _waitUntil(
+      () =>
+          repository.processedBatchIds.contains(101) &&
+          repository.claimedFreshChunks == 1,
+    );
+    await coordinator.stop();
+
+    expect(repository.batchPageLimits, isNotEmpty);
+    expect(repository.batchPageLimits, everyElement(lessThanOrEqualTo(100)));
+    expect(repository.batchPageLimits.length, greaterThanOrEqualTo(2));
+    expect(repository.processedBatchIds.toSet().length, 102);
+    expect(repository.processedBatchIds.length, 102);
+    expect(repository.processedBatchIds.indexOf(10000), lessThanOrEqualTo(1));
+    expect(repository.retriedBatchIds.toSet().length, 101);
+    expect(repository.retriedBatchIds.length, 101);
+  });
+
+  test(
+    'concurrent retry initialization cannot scan an empty snapshot',
+    () async {
+      final repository = _SchedulingRepository(retryCount: 1);
+      final maxIdGate = repository.maxAnalysisBatchIdGate = Completer<int>();
+      final coordinator = AnalysisCoordinator(
+        captureRepository: repository,
+        analysisRepository: repository,
+        timelineRepository: repository,
+        evidenceReader: const _EmptyEvidenceReader(),
+        serviceFactory: () async => throw StateError('expected test failure'),
+      );
+
+      final first = coordinator.retryFailed();
+      await Future<void>.delayed(Duration.zero);
+      final second = coordinator.retryFailed();
+      await Future<void>.delayed(Duration.zero);
+      maxIdGate.complete(1);
+      await Future.wait(<Future<void>>[first, second]);
+      await _waitUntil(() => repository.retriedBatchIds.isNotEmpty);
+      await coordinator.stop();
+
+      expect(repository.retriedBatchIds, <int>[1]);
+    },
+  );
+
+  test('standalone retry backlog cannot starve fresh pending work', () async {
+    final repository = _SchedulingRepository(
+      retryCount: 0,
+      standaloneRetryCount: 101,
+    );
+    final coordinator = AnalysisCoordinator(
+      captureRepository: repository,
+      analysisRepository: repository,
+      timelineRepository: repository,
+      evidenceReader: const _EmptyEvidenceReader(),
+      serviceFactory: () async => throw StateError('expected test failure'),
+    );
+
+    await coordinator.retryFailed();
+    await _waitUntil(
+      () => repository.claimedChunkIds.contains(_SchedulingRepository.freshId),
+    );
+    await coordinator.stop();
+
+    expect(
+      repository.claimedChunkIds.indexOf(_SchedulingRepository.freshId),
+      lessThanOrEqualTo(1),
+    );
+    expect(repository.standalonePageLimits, isNotEmpty);
+    expect(
+      repository.standalonePageLimits,
+      everyElement(lessThanOrEqualTo(100)),
+    );
+  });
+}
+
+Future<void> _waitUntil(bool Function() condition) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 3));
+  while (!condition()) {
+    if (DateTime.now().isAfter(deadline)) {
+      fail('Timed out waiting for analysis scheduling');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+  }
+}
+
+final class _SchedulingRepository
+    implements CaptureRepository, AnalysisRepository, TimelineRepository {
+  _SchedulingRepository({
+    required int retryCount,
+    int standaloneRetryCount = 0,
+  }) {
+    for (var id = 1; id <= retryCount; id++) {
+      final chunk = _chunk(id, ProcessingStatus.failed);
+      chunks[id] = chunk;
+      batches[id] = _batch(id, chunk.id!, ProcessingStatus.failed);
+    }
+    for (var id = 1; id <= standaloneRetryCount; id++) {
+      chunks[id] = _chunk(id, ProcessingStatus.failed);
+    }
+    chunks[freshId] = _chunk(freshId, ProcessingStatus.pending);
+  }
+
+  static const int freshId = 10000;
+  final Map<int, CaptureChunk> chunks = <int, CaptureChunk>{};
+  final Map<int, AnalysisBatch> batches = <int, AnalysisBatch>{};
+  final List<int> batchPageLimits = <int>[];
+  final List<int> standalonePageLimits = <int>[];
+  final List<int> retriedBatchIds = <int>[];
+  final List<int> processedBatchIds = <int>[];
+  final List<int> claimedChunkIds = <int>[];
+  final Set<int> _processingBatchIds = <int>{};
+  Completer<int>? maxAnalysisBatchIdGate;
+  var claimedFreshChunks = 0;
+  var _nextClaimedBatchId = 100000;
+
+  @override
+  Future<List<AnalysisBatch>> listBatches({
+    Set<ProcessingStatus>? statuses,
+    int? afterId,
+    int? beforeOrAtId,
+    int? updatedBeforeOrAtMs,
+    int limit = 100,
+  }) async {
+    batchPageLimits.add(limit);
+    return batches.values
+        .where(
+          (batch) =>
+              (afterId == null || batch.id! > afterId) &&
+              (beforeOrAtId == null || batch.id! <= beforeOrAtId) &&
+              (statuses == null || statuses.contains(batch.status)),
+        )
+        .take(limit)
+        .toList(growable: false);
+  }
+
+  @override
+  Future<int> getMaxAnalysisBatchId() async {
+    final gate = maxAnalysisBatchIdGate;
+    if (gate != null) return gate.future;
+    return batches.keys.fold<int>(
+      0,
+      (current, next) => current > next ? current : next,
+    );
+  }
+
+  @override
+  Future<bool> retryBatch(int batchId) async {
+    final batch = batches[batchId];
+    if (batch?.status != ProcessingStatus.failed) return false;
+    retriedBatchIds.add(batchId);
+    batches[batchId] = _batch(
+      batchId,
+      batch!.chunkIds.single,
+      ProcessingStatus.processing,
+    );
+    final chunkId = batch.chunkIds.single;
+    chunks[chunkId] = _chunk(chunkId, ProcessingStatus.processing);
+    return true;
+  }
+
+  @override
+  Future<AnalysisBatch?> getBatch(int id) async {
+    if (_processingBatchIds.add(id)) processedBatchIds.add(id);
+    return batches[id];
+  }
+
+  @override
+  Future<CaptureChunk?> getChunk(int id) async => chunks[id];
+
+  @override
+  Future<List<CaptureChunk>> listChunks({
+    Set<ProcessingStatus>? statuses,
+    int? dueAtMs,
+    bool? evidencePurged,
+    int? afterId,
+    int limit = 100,
+  }) async => chunks.values
+      .where(
+        (chunk) =>
+            (afterId == null || chunk.id! > afterId) &&
+            (statuses == null || statuses.contains(chunk.status)),
+      )
+      .take(limit)
+      .toList(growable: false);
+
+  @override
+  Future<AnalysisBatch> claimChunksForAnalysis(List<int> chunkIds) async {
+    claimedFreshChunks++;
+    final chunkId = chunkIds.single;
+    claimedChunkIds.add(chunkId);
+    chunks[chunkId] = _chunk(chunkId, ProcessingStatus.processing);
+    final batch = _batch(
+      _nextClaimedBatchId++,
+      chunkId,
+      ProcessingStatus.processing,
+    );
+    batches[batch.id!] = batch;
+    return batch;
+  }
+
+  @override
+  Future<bool> retryChunk(int id) async {
+    final chunk = chunks[id];
+    if (chunk?.status != ProcessingStatus.failed) return false;
+    chunks[id] = _chunk(id, ProcessingStatus.pending);
+    return true;
+  }
+
+  @override
+  Future<void> markAnalysisFailed(
+    int batchId,
+    String errorMessage, {
+    int? nextRetryAtMs,
+  }) async {
+    _processingBatchIds.remove(batchId);
+    final batch = batches[batchId]!;
+    batches[batchId] = _batch(
+      batchId,
+      batch.chunkIds.single,
+      ProcessingStatus.failed,
+    );
+    final chunkId = batch.chunkIds.single;
+    chunks[chunkId] = _chunk(chunkId, ProcessingStatus.failed);
+  }
+
+  @override
+  Future<List<int>> listStandaloneFailedChunkIds({
+    required int updatedBeforeOrAtMs,
+    int? afterId,
+    int limit = 100,
+  }) async {
+    standalonePageLimits.add(limit);
+    return chunks.values
+        .where(
+          (chunk) =>
+              chunk.status == ProcessingStatus.failed &&
+              !batches.values.any(
+                (batch) => batch.chunkIds.contains(chunk.id),
+              ) &&
+              (afterId == null || chunk.id! > afterId),
+        )
+        .map((chunk) => chunk.id!)
+        .take(limit)
+        .toList(growable: false);
+  }
+
+  @override
+  Future<List<TimelineCard>> getRecentCards({int limit = 10}) async =>
+      const <TimelineCard>[];
+
+  static CaptureChunk _chunk(int id, ProcessingStatus status) => CaptureChunk(
+    id: id,
+    sessionId: 1,
+    framesDirectory: 'C:/test/$id',
+    metadataPath: 'C:/test/$id.json',
+    videoPath: 'C:/test/$id.mp4',
+    startedAtMs: id * 1000,
+    endedAtMs: id * 1000 + 500,
+    frameCount: 1,
+    status: status,
+    createdAtMs: id * 1000,
+    updatedAtMs: id * 1000,
+  );
+
+  static AnalysisBatch _batch(int id, int chunkId, ProcessingStatus status) =>
+      AnalysisBatch(
+        id: id,
+        chunkIds: <int>[chunkId],
+        status: status,
+        createdAtMs: id * 1000,
+        updatedAtMs: id * 1000,
+      );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+final class _EmptyEvidenceReader extends ChunkEvidenceReader {
+  const _EmptyEvidenceReader();
+
+  @override
+  Future<ChunkEvidence> read(CaptureChunk chunk) async => const ChunkEvidence(
+    keyFrames: <AnalysisKeyFrame>[],
+    windowContexts: <WindowContextSegment>[],
+    resourceSamples: <WindowResourceSample>[],
+  );
 }
 
 final class _FakeTransport implements ChatTransport {

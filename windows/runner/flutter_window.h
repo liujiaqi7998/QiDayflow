@@ -7,6 +7,7 @@
 
 #include <memory>
 
+#include "exit_lifecycle.h"
 #include "tray_menu_state.h"
 #include "win32_window.h"
 
@@ -31,6 +32,7 @@ class FlutterWindow : public Win32Window {
  private:
   static constexpr UINT kTrayMessage = WM_APP + 0x42;
   static constexpr UINT kRequestExitMessage = WM_APP + 0x43;
+  static constexpr UINT kShutdownCompleteMessage = WM_APP + 0x44;
   static constexpr UINT kTrayShowCommand = 41001;
   static constexpr UINT kTrayExitCommand = 41002;
   static constexpr UINT kTrayCaptureCommand = 41003;
@@ -45,6 +47,7 @@ class FlutterWindow : public Win32Window {
   void HideApplicationWindow();
   void RequestApplicationExit();
   void CompleteApplicationExit();
+  void FinalizeApplicationExit();
 
   // The project to run.
   flutter::DartProject project_;
@@ -59,7 +62,7 @@ class FlutterWindow : public Win32Window {
   qi_day_flow::TrayCaptureState tray_capture_state_ =
       qi_day_flow::TrayCaptureState::kStopped;
   bool tray_icon_added_ = false;
-  bool exit_requested_ = false;
+  qi_day_flow::ExitLifecycle exit_lifecycle_;
   bool exit_allowed_ = false;
 };
 

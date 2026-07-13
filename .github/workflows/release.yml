@@ -53,8 +53,11 @@ jobs:
           cmake --build build\windows\x64 --config Release --target
           qi_day_flow_capture_pixel_buffer_test
           qi_day_flow_capture_runtime_test
+          qi_day_flow_frame_similarity_test
           qi_day_flow_native_frame_logger_test
           qi_day_flow_tray_menu_state_test
+          qi_day_flow_startup_behavior_test
+          qi_day_flow_exit_lifecycle_test
 
       - name: Run native regression tests
         shell: pwsh
@@ -64,9 +67,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & "$release\qi_day_flow_capture_runtime_test.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$release\qi_day_flow_frame_similarity_test.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & "$release\qi_day_flow_native_frame_logger_test.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & "$release\qi_day_flow_tray_menu_state_test.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$release\qi_day_flow_startup_behavior_test.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$release\qi_day_flow_exit_lifecycle_test.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Package release

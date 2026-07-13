@@ -687,6 +687,215 @@ void main() {
     expect(find.textContaining('磁盘写入失败'), findsOneWidget);
   });
 
+  testWidgets('settings navigation exposes an accessible new version badge', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final semantics = tester.ensureSemantics();
+    final viewModel = _TestViewModel()
+      ..update = const UpdateViewData(
+        currentVersion: '1.0.0',
+        latestVersion: '1.1.0',
+        updateAvailable: true,
+      );
+
+    await tester.pumpWidget(QiDayFlowApp(viewModel: viewModel));
+
+    expect(find.text('新版本'), findsOneWidget);
+    expect(find.bySemanticsLabel('设置，新版本可用'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('nav-settings')));
+    await tester.pumpAndSettle();
+    expect(viewModel.section, AppSection.settings);
+    semantics.dispose();
+  });
+
+  testWidgets('software update section checks, reports, and opens downloads', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(820, 700));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final gate = Completer<void>();
+    final viewModel = _TestViewModel()
+      ..section = AppSection.settings
+      ..updateCheckGate = gate
+      ..update = const UpdateViewData(
+        currentVersion: '1.0.0+2',
+        latestVersion: '1.1.0',
+        updateAvailable: true,
+      );
+
+    await tester.pumpWidget(QiDayFlowApp(viewModel: viewModel));
+    final checkUpdate = find.byKey(const ValueKey('settings-check-update'));
+    for (
+      var attempt = 0;
+      attempt < 10 && checkUpdate.evaluate().isEmpty;
+      attempt++
+    ) {
+      await tester.drag(find.byType(ListView), const Offset(0, -500));
+      await tester.pump();
+    }
+    expect(checkUpdate, findsOneWidget);
+    await tester.ensureVisible(checkUpdate);
+    await tester.pumpAndSettle();
+
+    expect(find.text('软件更新'), findsOneWidget);
+    expect(find.text('当前版本 1.0.0+2'), findsOneWidget);
+    expect(find.text('发现新版本 1.1.0'), findsOneWidget);
+    await tester.tap(checkUpdate);
+    await tester.pump();
+    expect(viewModel.updateCheckCalls, 1);
+    expect(find.text('正在检查'), findsOneWidget);
+    expect(tester.widget<OutlinedButton>(checkUpdate).onPressed, isNull);
+    await tester.tap(checkUpdate);
+    expect(viewModel.updateCheckCalls, 1);
+
+    gate.complete();
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('settings-open-releases')));
+    await tester.pumpAndSettle();
+    expect(viewModel.openReleasesCalls, 1);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'analysis retry count is selectable from zero to five and saved',
+    (WidgetTester tester) async {
+      await tester.binding.setSurfaceSize(const Size(1000, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final viewModel = _TestViewModel()..section = AppSection.settings;
+
+      await tester.pumpWidget(QiDayFlowApp(viewModel: viewModel));
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(
+        find.byKey(const ValueKey('settings-analysis-retry-count')),
+        250,
+        scrollable: find.byType(Scrollable).last,
+      );
+      await tester.tap(
+        find.byKey(const ValueKey('settings-analysis-retry-count')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('0 次'), findsOneWidget);
+      expect(find.text('5 次'), findsOneWidget);
+      await tester.tap(find.text('5 次'));
+      await tester.pumpAndSettle();
+
+      expect(viewModel.savedSettings, isNotEmpty);
+      expect(viewModel.savedSettings.last.analysisRetryCount, 5);
+      expect(find.text('0 表示不重试；3 表示失败后最多重试 3 次，总尝试最多 4 次。'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('failed retry count save reverts the selector', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1000, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final viewModel = _TestViewModel()
+      ..section = AppSection.settings
+      ..settingsSaveFailure = StateError('disk full');
+
+    await tester.pumpWidget(QiDayFlowApp(viewModel: viewModel));
+    await tester.pumpAndSettle();
+    final retrySelector = find.byKey(
+      const ValueKey('settings-analysis-retry-count'),
+    );
+    await tester.scrollUntilVisible(
+      retrySelector,
+      250,
+      scrollable: find.byType(Scrollable).last,
+    );
+    await tester.tap(retrySelector);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('5 次'));
+    await tester.pumpAndSettle();
+
+    expect(viewModel.savedSettings.last.analysisRetryCount, 5);
+    expect(find.textContaining('设置保存失败'), findsOneWidget);
+    expect(tester.widget<DropdownButton<int>>(retrySelector).value, 3);
+  });
+
+  testWidgets(
+    'API connection test shows progress and ignores duplicate clicks',
+    (WidgetTester tester) async {
+      await tester.binding.setSurfaceSize(const Size(1000, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final gate = Completer<void>();
+      final viewModel = _TestViewModel()
+        ..section = AppSection.settings
+        ..testConnectionGate = gate;
+
+      await tester.pumpWidget(QiDayFlowApp(viewModel: viewModel));
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(
+        find.byKey(const ValueKey('settings-test-api-connection')),
+        250,
+        scrollable: find.byType(Scrollable).last,
+      );
+      await tester.tap(
+        find.byKey(const ValueKey('settings-test-api-connection')),
+      );
+      await tester.pump();
+
+      expect(viewModel.testConnectionCalls, 1);
+      expect(find.text('正在测试'), findsOneWidget);
+      expect(
+        tester
+            .widget<OutlinedButton>(
+              find.byKey(const ValueKey('settings-test-api-connection')),
+            )
+            .onPressed,
+        isNull,
+      );
+      await tester.tap(
+        find.byKey(const ValueKey('settings-test-api-connection')),
+      );
+      expect(viewModel.testConnectionCalls, 1);
+
+      gate.complete();
+      await tester.pumpAndSettle();
+      expect(find.text('连接成功'), findsOneWidget);
+    },
+  );
+
+  testWidgets('invalid API URLs neither autosave nor test the connection', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1000, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final viewModel = _TestViewModel()..section = AppSection.settings;
+    await tester.pumpWidget(QiDayFlowApp(viewModel: viewModel));
+    await tester.pumpAndSettle();
+
+    final apiUrl = find.byKey(const ValueKey('settings-api-url'));
+    final testConnection = find.byKey(
+      const ValueKey('settings-test-api-connection'),
+    );
+    final cases = <String, String>{
+      'http://api.example.com/v1': '远程服务必须使用 HTTPS',
+      'https://user:secret@api.example.com/v1': '不能包含用户信息',
+      'https://api.example.com/v1?key=value': '不能包含查询参数',
+      'https://api.example.com/v1#section': '不能包含片段',
+    };
+    for (final entry in cases.entries) {
+      await tester.enterText(apiUrl, entry.key);
+      await tester.pump(const Duration(milliseconds: 600));
+      await tester.scrollUntilVisible(
+        testConnection,
+        250,
+        scrollable: find.byType(Scrollable).last,
+      );
+      tester.widget<OutlinedButton>(testConnection).onPressed!.call();
+      await tester.pump();
+      expect(find.textContaining(entry.value), findsOneWidget);
+    }
+
+    expect(viewModel.savedSettings, isEmpty);
+    expect(viewModel.testConnectionCalls, 0);
+  });
+
   testWidgets(
     'capture interval selector is accessible and saves exact values',
     (WidgetTester tester) async {
@@ -1728,6 +1937,11 @@ final class _TestViewModel extends ChangeNotifier
   final List<String> iconRequests = <String>[];
   int analysisQueueRefreshCalls = 0;
   int retryFailedCalls = 0;
+  int updateCheckCalls = 0;
+  int openReleasesCalls = 0;
+  Completer<void>? updateCheckGate;
+  Completer<void>? testConnectionGate;
+  int testConnectionCalls = 0;
   Completer<void>? refreshGate;
   Completer<void>? retryGate;
 
@@ -1778,6 +1992,9 @@ final class _TestViewModel extends ChangeNotifier
     captureIntervalSeconds: 10,
     themeMode: ThemeMode.system,
   );
+
+  @override
+  UpdateViewData update = const UpdateViewData(currentVersion: '1.0.0');
 
   @override
   AnalysisQueueViewData analysisQueue = const AnalysisQueueViewData();
@@ -1885,7 +2102,37 @@ final class _TestViewModel extends ChangeNotifier
   }
 
   @override
-  Future<void> testApiConnection(SettingsDraft draft) async {}
+  Future<void> testApiConnection(SettingsDraft draft) async {
+    testConnectionCalls++;
+    await testConnectionGate?.future;
+  }
+
+  @override
+  Future<void> checkForUpdates() async {
+    if (update.checking) return;
+    updateCheckCalls++;
+    update = UpdateViewData(
+      currentVersion: update.currentVersion,
+      latestVersion: update.latestVersion,
+      checking: true,
+      updateAvailable: update.updateAvailable,
+      lastChecked: update.lastChecked,
+    );
+    notifyListeners();
+    await updateCheckGate?.future;
+    update = UpdateViewData(
+      currentVersion: update.currentVersion,
+      latestVersion: update.latestVersion,
+      updateAvailable: update.updateAvailable,
+      lastChecked: DateTime(2026, 7, 13),
+    );
+    notifyListeners();
+  }
+
+  @override
+  Future<void> openReleasesPage() async {
+    openReleasesCalls++;
+  }
 
   @override
   Future<String?> chooseUserDataDirectory() async => null;

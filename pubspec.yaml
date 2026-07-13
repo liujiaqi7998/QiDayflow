@@ -20,3 +20,7 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  fonts:
+    - family: MiSans
+      fonts:
+        - asset: fonts/MiSans-Regular.ttf

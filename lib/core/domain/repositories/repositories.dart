@@ -39,6 +39,7 @@ abstract interface class CaptureRepository {
     Set<ProcessingStatus>? statuses,
     int? dueAtMs,
     bool? evidencePurged,
+    int? afterId,
     int limit = 100,
   });
 
@@ -76,8 +77,19 @@ abstract interface class AnalysisRepository {
 
   Future<AnalysisBatch?> getBatch(int id);
 
+  Future<int> getMaxAnalysisBatchId();
+
   Future<List<AnalysisBatch>> listBatches({
     Set<ProcessingStatus>? statuses,
+    int? afterId,
+    int? beforeOrAtId,
+    int? updatedBeforeOrAtMs,
+    int limit = 100,
+  });
+
+  Future<List<int>> listStandaloneFailedChunkIds({
+    required int updatedBeforeOrAtMs,
+    int? afterId,
     int limit = 100,
   });
 

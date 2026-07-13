@@ -12,6 +12,8 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <thread>
+#include <vector>
 
 #include "capture_service.h"
 #include "native_frame_logger.h"
@@ -37,6 +39,7 @@ class NativeBridge {
   void DrainEvents();
   void NotifyExitRequested();
   void NotifyTrayCommand(TrayCaptureCommand command);
+  bool ShutdownAsync(std::function<void()> completion);
   void Shutdown();
 
  private:
@@ -60,7 +63,10 @@ class NativeBridge {
   std::unique_ptr<flutter::EventSink<flutter::EncodableValue>> event_sink_;
   std::mutex event_mutex_;
   std::deque<flutter::EncodableValue> pending_events_;
+  std::vector<std::function<void()>> shutdown_completions_;
+  std::thread shutdown_thread_;
   bool shutting_down_ = false;
+  bool shutdown_complete_ = false;
 };
 
 }  // namespace qi_day_flow

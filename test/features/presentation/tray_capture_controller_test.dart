@@ -195,29 +195,161 @@ void main() {
     },
   );
 
-  test('native state query cannot clear a timed-out stop tombstone', () async {
+  test(
+    'matching stopped state query clears a timed-out stop tombstone',
+    () async {
+      final harness = await _ControllerHarness.create(
+        stopTimeout: const Duration(milliseconds: 50),
+      );
+      addTearDown(harness.dispose);
+      await harness.controller.initialize();
+      await harness.controller.startCapture();
+      harness.native.autoEmitStopped = false;
+      harness.native.queriedStatus = NativeCaptureStatus.stopped;
+
+      await harness.controller.stopCapture();
+      await harness.controller.startCapture();
+
+      expect(harness.native.stateQueries, greaterThanOrEqualTo(1));
+      expect(harness.native.startCalls, 2);
+      expect(harness.controller.recordingStatus, RecordingViewStatus.recording);
+    },
+  );
+
+  test(
+    'matching stopped event during reconciliation completes the stop',
+    () async {
+      final harness = await _ControllerHarness.create(
+        stopTimeout: const Duration(milliseconds: 30),
+        stopReconciliationTimeout: const Duration(seconds: 1),
+      );
+      addTearDown(harness.dispose);
+      await harness.controller.initialize();
+      await harness.controller.startCapture();
+      final sessionId = harness.native.currentSessionId!;
+      harness.native.autoEmitStopped = false;
+      harness.native.queriedStatus = NativeCaptureStatus.stopped;
+      final queryGate = harness.native.stateQueryGate = Completer<void>();
+
+      final stop = harness.controller.stopCapture();
+      await _waitFor(() => harness.native.stateQueries == 1);
+      harness.native.emitState(
+        NativeCaptureStatus.stopped,
+        sessionId: sessionId,
+      );
+      queryGate.complete();
+      await stop;
+
+      expect(harness.controller.recordingStatus, RecordingViewStatus.stopped);
+      expect(harness.controller.statusMessage, isNot(contains('停止采集失败')));
+    },
+  );
+
+  for (final activeStatus in <NativeCaptureStatus>[
+    NativeCaptureStatus.stopping,
+    NativeCaptureStatus.capturing,
+  ]) {
+    test('$activeStatus state query does not clear a stop tombstone', () async {
+      final harness = await _ControllerHarness.create(
+        stopTimeout: const Duration(milliseconds: 30),
+      );
+      addTearDown(harness.dispose);
+      await harness.controller.initialize();
+      await harness.controller.startCapture();
+      harness.native.autoEmitStopped = false;
+      harness.native.queriedStatus = activeStatus;
+
+      await harness.controller.stopCapture();
+      await harness.controller.startCapture();
+
+      expect(harness.native.stateQueries, greaterThanOrEqualTo(1));
+      expect(harness.native.startCalls, 1);
+      expect(harness.controller.recordingStatus, RecordingViewStatus.error);
+    });
+  }
+
+  test('state query timeout does not clear a stop tombstone', () async {
     final harness = await _ControllerHarness.create(
-      stopTimeout: const Duration(milliseconds: 50),
+      stopTimeout: const Duration(milliseconds: 30),
+      stopReconciliationTimeout: const Duration(milliseconds: 30),
+    );
+    addTearDown(harness.dispose);
+    await harness.controller.initialize();
+    await harness.controller.startCapture();
+    harness.native.autoEmitStopped = false;
+    harness.native.stateQueryGate = Completer<void>();
+
+    await harness.controller.stopCapture();
+    await harness.controller.startCapture();
+
+    expect(harness.native.startCalls, 1);
+    expect(harness.controller.recordingStatus, RecordingViewStatus.error);
+  });
+
+  test('state query error does not clear a stop tombstone', () async {
+    final harness = await _ControllerHarness.create(
+      stopTimeout: const Duration(milliseconds: 30),
+    );
+    addTearDown(harness.dispose);
+    await harness.controller.initialize();
+    await harness.controller.startCapture();
+    harness.native.autoEmitStopped = false;
+    harness.native.stateQueryError = StateError('query unavailable');
+
+    await harness.controller.stopCapture();
+    await harness.controller.startCapture();
+
+    expect(harness.native.startCalls, 1);
+    expect(harness.controller.recordingStatus, RecordingViewStatus.error);
+  });
+
+  test('stopped state for another session does not clear tombstone', () async {
+    final harness = await _ControllerHarness.create(
+      stopTimeout: const Duration(milliseconds: 30),
     );
     addTearDown(harness.dispose);
     await harness.controller.initialize();
     await harness.controller.startCapture();
     harness.native.autoEmitStopped = false;
     harness.native.queriedStatus = NativeCaptureStatus.stopped;
+    harness.native.queriedSessionId = 'different-session';
 
     await harness.controller.stopCapture();
     await harness.controller.startCapture();
 
-    expect(harness.native.stateQueries, 0);
     expect(harness.native.startCalls, 1);
     expect(harness.controller.recordingStatus, RecordingViewStatus.error);
+  });
 
-    harness.native.emitState(NativeCaptureStatus.stopped);
+  test('late old state query cannot unlock a newer session', () async {
+    final harness = await _ControllerHarness.create(
+      stopTimeout: const Duration(milliseconds: 30),
+      stopReconciliationTimeout: const Duration(milliseconds: 30),
+    );
+    addTearDown(harness.dispose);
+    await harness.controller.initialize();
+    await harness.controller.startCapture();
+    final oldSessionId = harness.native.currentSessionId!;
+    harness.native.autoEmitStopped = false;
+    final queryGate = harness.native.stateQueryGate = Completer<void>();
+
+    await harness.controller.stopCapture();
+    harness.native.emitState(
+      NativeCaptureStatus.stopped,
+      sessionId: oldSessionId,
+    );
     await _flushEvents();
     await harness.controller.startCapture();
+    final newSessionId = harness.native.currentSessionId!;
+    expect(newSessionId, isNot(oldSessionId));
 
-    expect(harness.native.startCalls, 2);
+    harness.native.queriedStatus = NativeCaptureStatus.stopped;
+    harness.native.queriedSessionId = oldSessionId;
+    queryGate.complete();
+    await _flushEvents();
+
     expect(harness.controller.recordingStatus, RecordingViewStatus.recording);
+    expect(harness.native.currentSessionId, newSessionId);
   });
 
   test(
@@ -369,6 +501,7 @@ final class _ControllerHarness {
 
   static Future<_ControllerHarness> create({
     Duration stopTimeout = const Duration(seconds: 15),
+    Duration stopReconciliationTimeout = const Duration(seconds: 2),
   }) async {
     final root = await Directory.systemTemp.createTemp('qi_tray_controller_');
     final captures = Directory(p.join(root.path, 'captures'));
@@ -390,6 +523,7 @@ final class _ControllerHarness {
       ),
       activeUserDataDirectory: root.path,
       stopTimeout: stopTimeout,
+      stopReconciliationTimeout: stopReconciliationTimeout,
     );
     return _ControllerHarness(
       root: root,
@@ -432,6 +566,9 @@ final class _FakeNativeCaptureService extends NativeCaptureService {
   bool autoEmitStopped = true;
   String? currentSessionId;
   NativeCaptureStatus queriedStatus = NativeCaptureStatus.stopping;
+  String? queriedSessionId;
+  Completer<void>? stateQueryGate;
+  Object? stateQueryError;
   int stateQueries = 0;
 
   @override
@@ -497,9 +634,12 @@ final class _FakeNativeCaptureService extends NativeCaptureService {
   @override
   Future<Map<Object?, Object?>> getState() async {
     stateQueries++;
+    await stateQueryGate?.future;
+    final error = stateQueryError;
+    if (error != null) throw error;
     return <Object?, Object?>{
       'status': queriedStatus.name,
-      'sessionId': currentSessionId,
+      'sessionId': queriedSessionId ?? currentSessionId,
     };
   }
 

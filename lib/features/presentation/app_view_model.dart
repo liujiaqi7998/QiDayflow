@@ -17,6 +17,24 @@ enum RecordingViewStatus {
 
 enum SettingsSaveStatus { idle, saving, saved, error }
 
+final class UpdateViewData {
+  const UpdateViewData({
+    required this.currentVersion,
+    this.latestVersion,
+    this.checking = false,
+    this.updateAvailable = false,
+    this.lastChecked,
+    this.error,
+  });
+
+  final String currentVersion;
+  final String? latestVersion;
+  final bool checking;
+  final bool updateAvailable;
+  final DateTime? lastChecked;
+  final String? error;
+}
+
 final class AnalysisQueueItemViewData {
   const AnalysisQueueItemViewData({
     required this.chunkId,
@@ -328,6 +346,7 @@ class SettingsDraft {
     this.apiKeyChanged = true,
     this.autoStartRecording = false,
     this.launchAtLogin = false,
+    this.analysisRetryCount = 3,
   });
 
   final String apiUrl;
@@ -343,6 +362,7 @@ class SettingsDraft {
   final bool apiKeyChanged;
   final bool autoStartRecording;
   final bool launchAtLogin;
+  final int analysisRetryCount;
 }
 
 class SettingsViewData {
@@ -361,6 +381,7 @@ class SettingsViewData {
     this.logLevel = AppLogLevel.info,
     this.autoStartRecording = false,
     this.launchAtLogin = false,
+    this.analysisRetryCount = 3,
   });
 
   final String apiUrl;
@@ -377,6 +398,7 @@ class SettingsViewData {
   final AppLogLevel logLevel;
   final bool autoStartRecording;
   final bool launchAtLogin;
+  final int analysisRetryCount;
 }
 
 abstract class QiDayFlowViewModel implements Listenable {
@@ -392,6 +414,7 @@ abstract class QiDayFlowViewModel implements Listenable {
   int get statisticsDays;
   StatisticsViewData get statistics;
   SettingsViewData get settings;
+  UpdateViewData get update;
   AnalysisQueueViewData get analysisQueue;
   int get failedChunkCount;
   int get pendingChunkCount;
@@ -419,6 +442,8 @@ abstract class QiDayFlowViewModel implements Listenable {
   Future<void> saveSettings(SettingsDraft draft);
   Future<void> updateLogLevel(AppLogLevel level);
   Future<void> testApiConnection(SettingsDraft draft);
+  Future<void> checkForUpdates();
+  Future<void> openReleasesPage();
   Future<String?> chooseUserDataDirectory();
   Future<void> clearCompletedVideos();
   Future<void> clearManagedLogs();

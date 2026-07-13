@@ -159,6 +159,10 @@ class _Sidebar extends StatelessWidget {
               selectedIcon: Icons.settings,
               label: '设置',
               selected: viewModel.section == AppSection.settings,
+              badge: viewModel.update.updateAvailable ? '新版本' : null,
+              semanticsLabel: viewModel.update.updateAvailable
+                  ? '设置，新版本可用'
+                  : '设置',
               onPressed: () => viewModel.selectSection(AppSection.settings),
             ),
             const Spacer(),
@@ -211,6 +215,8 @@ class _NavItem extends StatelessWidget {
     required this.label,
     required this.selected,
     required this.onPressed,
+    this.badge,
+    this.semanticsLabel,
   });
 
   final IconData icon;
@@ -218,45 +224,74 @@ class _NavItem extends StatelessWidget {
   final String label;
   final bool selected;
   final VoidCallback onPressed;
+  final String? badge;
+  final String? semanticsLabel;
 
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 5),
-      child: Material(
-        color: selected ? colors.secondaryContainer : Colors.transparent,
-        borderRadius: BorderRadius.circular(6),
-        child: InkWell(
-          onTap: onPressed,
+    return Semantics(
+      label: semanticsLabel,
+      button: true,
+      selected: selected,
+      excludeSemantics: semanticsLabel != null,
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 5),
+        child: Material(
+          color: selected ? colors.secondaryContainer : Colors.transparent,
           borderRadius: BorderRadius.circular(6),
-          child: SizedBox(
-            height: 44,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: Row(
-                children: [
-                  Icon(
-                    selected ? selectedIcon : icon,
-                    size: 20,
-                    color: selected
-                        ? colors.onSecondaryContainer
-                        : colors.onSurfaceVariant,
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                        color: selected
-                            ? colors.onSecondaryContainer
-                            : colors.onSurfaceVariant,
+          child: InkWell(
+            onTap: onPressed,
+            borderRadius: BorderRadius.circular(6),
+            child: SizedBox(
+              height: 44,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: Row(
+                  children: [
+                    Icon(
+                      selected ? selectedIcon : icon,
+                      size: 20,
+                      color: selected
+                          ? colors.onSecondaryContainer
+                          : colors.onSurfaceVariant,
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                          color: selected
+                              ? colors.onSecondaryContainer
+                              : colors.onSurfaceVariant,
+                        ),
                       ),
                     ),
-                  ),
-                ],
+                    if (badge case final badge?) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 3,
+                        ),
+                        decoration: BoxDecoration(
+                          color: colors.primaryContainer,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text(
+                          badge,
+                          style: Theme.of(context).textTheme.labelSmall
+                              ?.copyWith(
+                                color: colors.onPrimaryContainer,
+                                fontWeight: FontWeight.w700,
+                              ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
               ),
             ),
           ),

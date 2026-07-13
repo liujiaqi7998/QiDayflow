@@ -11,6 +11,9 @@ import 'package:qi_day_flow/data/data.dart';
 import 'package:qi_day_flow/features/presentation/app_controller.dart';
 import 'package:qi_day_flow/features/presentation/app_view_model.dart';
 import 'package:qi_day_flow/services/native/native_capture_service.dart';
+import 'package:qi_day_flow/services/openai/analysis_models.dart';
+import 'package:qi_day_flow/services/openai/chat_transport.dart';
+import 'package:qi_day_flow/services/openai/openai_analysis_service.dart';
 import 'package:qi_day_flow/services/secure_settings_service.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
@@ -53,6 +56,7 @@ void main() {
       methodChannel: methods,
       eventChannel: events,
     );
+    OpenAiAnalysisConfig? testedConnectionConfig;
     final controller = AppController(
       database: database,
       repository: repository,
@@ -63,6 +67,13 @@ void main() {
         defaultUserDataDirectory: root.path,
       ),
       activeUserDataDirectory: root.path,
+      analysisServiceBuilder: (config) {
+        testedConnectionConfig = config;
+        return OpenAiAnalysisService(
+          config: config,
+          transport: _SuccessfulConnectionTransport(),
+        );
+      },
     );
     addTearDown(() async {
       controller.dispose();
@@ -78,7 +89,9 @@ void main() {
 
     final first = controller.saveSettings(_draft(controller, 'older-model'));
     await _waitFor(() => settingsRepository.pendingWrites.length == 1);
-    final second = controller.saveSettings(_draft(controller, 'newest-model'));
+    final second = controller.saveSettings(
+      _draft(controller, 'newest-model', analysisRetryCount: 5),
+    );
     await Future<void>.delayed(Duration.zero);
 
     expect(settingsRepository.pendingWrites, hasLength(1));
@@ -97,6 +110,18 @@ void main() {
     );
     expect(stored.apiModel, 'newest-model');
     expect(stored.captureIntervalSeconds, 10);
+    expect(stored.analysisRetryCount, 5);
+    expect(controller.settings.analysisRetryCount, 5);
+
+    await controller.testApiConnection(
+      _draft(
+        controller,
+        'connection-model',
+        apiKey: 'temporary-key',
+        analysisRetryCount: 5,
+      ),
+    );
+    expect(testedConnectionConfig?.maxAttempts, 6);
 
     final failed = controller.saveSettings(_draft(controller, 'failed-model'));
     await _waitFor(() => settingsRepository.pendingWrites.length == 3);
@@ -113,10 +138,15 @@ void main() {
   });
 }
 
-SettingsDraft _draft(AppController controller, String model) => SettingsDraft(
+SettingsDraft _draft(
+  AppController controller,
+  String model, {
+  String apiKey = '',
+  int? analysisRetryCount,
+}) => SettingsDraft(
   apiUrl: controller.settings.apiUrl,
-  apiKey: '',
-  apiKeyChanged: false,
+  apiKey: apiKey,
+  apiKeyChanged: apiKey.isNotEmpty,
   model: model,
   userDataDirectory: controller.settings.userDataDirectory,
   cacheLimitGb: controller.settings.cacheLimitGb,
@@ -125,6 +155,8 @@ SettingsDraft _draft(AppController controller, String model) => SettingsDraft(
   captureIntervalSeconds: controller.settings.captureIntervalSeconds,
   themeMode: ThemeMode.system,
   logLevel: controller.settings.logLevel,
+  analysisRetryCount:
+      analysisRetryCount ?? controller.settings.analysisRetryCount,
 );
 
 Future<void> _waitFor(bool Function() predicate) async {
@@ -174,6 +206,26 @@ final class _DelayedSettingsRepository implements SettingsRepository {
     await pending.gate.future;
     values[key] = value;
   }
+}
+
+final class _SuccessfulConnectionTransport implements ChatTransport {
+  @override
+  Future<Map<String, Object?>> postJson({
+    required Uri uri,
+    required Map<String, String> headers,
+    required Map<String, Object?> body,
+    required Duration timeout,
+    required int maxResponseBytes,
+  }) async => <String, Object?>{
+    'choices': <Object?>[
+      <String, Object?>{
+        'message': <String, Object?>{'content': '{"ok":true}'},
+      },
+    ],
+  };
+
+  @override
+  void close() {}
 }
 
 final class _PendingWrite {

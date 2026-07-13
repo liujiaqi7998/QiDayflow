@@ -23,7 +23,20 @@ import '../../services/processing/chunk_evidence.dart';
 import '../../services/reports/daily_report_service.dart';
 import '../../services/secure_settings_service.dart';
 import '../../services/statistics/statistics_service.dart';
+import '../../services/update/update_check_service.dart';
 import 'app_view_model.dart';
+
+enum AppInitializationStage {
+  databaseOpened,
+  subscriptionStarted,
+  settingsLoaded,
+  loggingConfigured,
+  coordinatorCreated,
+  beforeDerivedRefresh,
+}
+
+typedef AppInitializationStageHook =
+    Future<void> Function(AppInitializationStage stage);
 
 class AppController extends ChangeNotifier implements QiDayFlowViewModel {
   AppController({
@@ -37,7 +50,13 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
     ManagedLogService? managedLogService,
     Duration maintenanceInterval = const Duration(seconds: 30),
     Duration stopTimeout = const Duration(seconds: 15),
+    Duration stopReconciliationTimeout = const Duration(seconds: 2),
     DateTime Function()? now,
+    UpdateCheckService? updateCheckService,
+    Future<bool> Function(Uri uri)? releasePageOpener,
+    OpenAiAnalysisService Function(OpenAiAnalysisConfig config)?
+    analysisServiceBuilder,
+    AppInitializationStageHook? initializationStageHook,
   }) : _database = database,
        _repository = repository,
        _nativeService = nativeService,
@@ -56,7 +75,13 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
            ),
        _maintenanceInterval = maintenanceInterval,
        _stopTimeout = stopTimeout,
+       _stopReconciliationTimeout = stopReconciliationTimeout,
        _now = now ?? DateTime.now,
+       _updateCheckService = updateCheckService,
+       _releasePageOpener = releasePageOpener ?? _unsupportedReleasePageOpener,
+       _analysisServiceBuilder =
+           analysisServiceBuilder ?? _defaultAnalysisServiceBuilder,
+       _initializationStageHook = initializationStageHook,
        _evidenceStore = EvidenceStore(nativeService: nativeService) {
     if (maintenanceInterval <= Duration.zero) {
       throw ArgumentError.value(
@@ -68,11 +93,21 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
     if (stopTimeout <= Duration.zero) {
       throw ArgumentError.value(stopTimeout, 'stopTimeout', '必须大于零');
     }
+    if (stopReconciliationTimeout <= Duration.zero) {
+      throw ArgumentError.value(
+        stopReconciliationTimeout,
+        'stopReconciliationTimeout',
+        '必须大于零',
+      );
+    }
     _cacheRotationService = CacheRotationService(
       captureRepository: repository,
       evidenceStore: _evidenceStore,
     );
     timelineDate = _now();
+    update = UpdateViewData(
+      currentVersion: updateCheckService?.currentVersion ?? '未知',
+    );
   }
 
   final AppDatabase _database;
@@ -85,7 +120,13 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
   final ManagedLogService _managedLogService;
   final Duration _maintenanceInterval;
   final Duration _stopTimeout;
+  final Duration _stopReconciliationTimeout;
   final DateTime Function() _now;
+  final UpdateCheckService? _updateCheckService;
+  final Future<bool> Function(Uri uri) _releasePageOpener;
+  final OpenAiAnalysisService Function(OpenAiAnalysisConfig config)
+  _analysisServiceBuilder;
+  final AppInitializationStageHook? _initializationStageHook;
   final StatisticsService _statisticsService = const StatisticsService();
   final EvidenceStore _evidenceStore;
   late final CacheRotationService _cacheRotationService;
@@ -104,6 +145,9 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
   int? _pendingTerminalErrorGeneration;
   String? _pendingTerminalError;
   Future<void>? _managedLogClearOperation;
+  Future<void>? _updateCheckOperation;
+  Future<void>? _shutdownOperation;
+  int _updateCheckGeneration = 0;
   int _latestSettingsSaveRevision = 0;
   Timer? _recordingTimer;
   Timer? _refreshTimer;
@@ -114,6 +158,11 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
   bool _initialized = false;
   bool _exiting = false;
   bool _disposed = false;
+  bool _updateCheckServiceClosed = false;
+  bool _databaseOpened = false;
+  bool _analysisCoordinatorInitialized = false;
+  bool _nativeLoggingStarted = false;
+  bool _loggerClosed = false;
   int? _lastRotationNoticeAtMs;
   int _dailyGoalHours = 8;
 
@@ -142,6 +191,8 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
   @override
   late SettingsViewData settings;
   @override
+  late UpdateViewData update;
+  @override
   AnalysisQueueViewData analysisQueue = const AnalysisQueueViewData();
   @override
   int failedChunkCount = 0;
@@ -165,75 +216,102 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
 
   Future<void> initialize() async {
     if (_initialized) return;
-    await _database.open();
-    final recovery = await _repository.recoverInterruptedWork();
-    _nativeSubscription = _nativeService.events.listen(
-      _handleNativeEvent,
-      onError: (Object error, StackTrace stackTrace) {
-        _setMessage('原生事件通道异常：$error');
-      },
-    );
-    _runtimeSettings = await _settingsService.load();
-    try {
-      final launchAtLogin = await _nativeService.queryLaunchAtLogin();
-      _runtimeSettings = _runtimeSettings.copyWith(
-        launchAtLogin: launchAtLogin,
-      );
-    } on Object catch (error) {
-      _setMessage('读取开机自启动设置失败：$error');
+    if (_shutdownOperation != null) {
+      throw StateError('控制器已关闭，不能再次初始化');
     }
-    await _applyLogLevel(_runtimeSettings.logLevel);
-    await _queueTrayCaptureState(recordingStatus);
-    final dataDirectoryService = _dataDirectoryService;
-    if (dataDirectoryService != null &&
-        !_sameWindowsPath(
-          _activeUserDataDirectory,
-          _runtimeSettings.userDataDirectory,
-        )) {
+    try {
+      await _database.open();
+      _databaseOpened = true;
+      await _runInitializationHook(AppInitializationStage.databaseOpened);
+      final recovery = await _repository.recoverInterruptedWork();
+      _nativeSubscription = _nativeService.events.listen(
+        _handleNativeEvent,
+        onError: (Object error, StackTrace stackTrace) {
+          _setMessage('原生事件通道异常：$error');
+        },
+      );
+      await _runInitializationHook(AppInitializationStage.subscriptionStarted);
+      _runtimeSettings = await _settingsService.load();
+      await _runInitializationHook(AppInitializationStage.settingsLoaded);
       try {
-        await dataDirectoryService.scheduleChange(
-          currentUserDataDirectory: _activeUserDataDirectory,
-          nextUserDataDirectory: _runtimeSettings.userDataDirectory,
+        final launchAtLogin = await _nativeService.queryLaunchAtLogin();
+        _runtimeSettings = _runtimeSettings.copyWith(
+          launchAtLogin: launchAtLogin,
         );
       } on Object catch (error) {
-        _setMessage('用户数据目录迁移调度失败：$error');
+        _setMessage('读取开机自启动设置失败：$error');
       }
+      await _applyLogLevel(_runtimeSettings.logLevel);
+      await _runInitializationHook(AppInitializationStage.loggingConfigured);
+      await _queueTrayCaptureState(recordingStatus);
+      final dataDirectoryService = _dataDirectoryService;
+      if (dataDirectoryService != null &&
+          !_sameWindowsPath(
+            _activeUserDataDirectory,
+            _runtimeSettings.userDataDirectory,
+          )) {
+        try {
+          await dataDirectoryService.scheduleChange(
+            currentUserDataDirectory: _activeUserDataDirectory,
+            nextUserDataDirectory: _runtimeSettings.userDataDirectory,
+          );
+        } on Object catch (error) {
+          _setMessage('用户数据目录迁移调度失败：$error');
+        }
+      }
+      _dailyGoalHours = await _settingsService.loadDailyGoalHours();
+      _hasApiKey = _runtimeSettings.apiKeyConfigured;
+      _syncSettingsView();
+      _analysisCoordinator = AnalysisCoordinator(
+        captureRepository: _repository,
+        analysisRepository: _repository,
+        timelineRepository: _repository,
+        serviceFactory: _createAnalysisService,
+        evidenceReader: ChunkEvidenceReader(nativeService: _nativeService),
+        onChanged: () => unawaited(_handleAnalysisChanged()),
+        onMessage: _setMessage,
+      );
+      _analysisCoordinatorInitialized = true;
+      _dailyReportService = DailyReportService(
+        timelineRepository: _repository,
+        reportRepository: _repository,
+        serviceFactory: _createAnalysisService,
+        modelName: () async => _runtimeSettings.apiModel,
+      );
+      await _runInitializationHook(AppInitializationStage.coordinatorCreated);
+      _initialized = true;
+      await _runInitializationHook(AppInitializationStage.beforeDerivedRefresh);
+      await _rotateCache();
+      await _refreshDerivedData();
+      if (_hasApiKey) _analysisCoordinator.schedule();
+      if (recovery.sessionsFailed + recovery.chunksFailed > 0) {
+        _setMessage('已恢复上次中断的采集与分析任务，原始证据保持不变');
+      }
+      _refreshTimer = Timer.periodic(_maintenanceInterval, (_) {
+        unawaited(_runPeriodicMaintenance());
+      });
+      _safeNotify();
+      await _logger?.log(AppLogLevel.info, 'app.initialized');
+      await _refreshManagedLogSize();
+      if (_runtimeSettings.autoStartRecording &&
+          recordingStatus == RecordingViewStatus.stopped) {
+        await startCapture();
+      }
+      if (_updateCheckService != null) {
+        unawaited(_startUpdateCheck(manual: false));
+      }
+    } on Object {
+      try {
+        await shutdown();
+      } on Object {
+        // Preserve the initialization failure after best-effort full rollback.
+      }
+      rethrow;
     }
-    _dailyGoalHours = await _settingsService.loadDailyGoalHours();
-    _hasApiKey = _runtimeSettings.apiKeyConfigured;
-    _syncSettingsView();
-    _analysisCoordinator = AnalysisCoordinator(
-      captureRepository: _repository,
-      analysisRepository: _repository,
-      timelineRepository: _repository,
-      serviceFactory: _createAnalysisService,
-      evidenceReader: ChunkEvidenceReader(nativeService: _nativeService),
-      onChanged: () => unawaited(_handleAnalysisChanged()),
-      onMessage: _setMessage,
-    );
-    _dailyReportService = DailyReportService(
-      timelineRepository: _repository,
-      reportRepository: _repository,
-      serviceFactory: _createAnalysisService,
-      modelName: () async => _runtimeSettings.apiModel,
-    );
-    _initialized = true;
-    await _rotateCache();
-    await _refreshDerivedData();
-    if (_hasApiKey) _analysisCoordinator.schedule();
-    if (recovery.sessionsFailed + recovery.chunksFailed > 0) {
-      _setMessage('已恢复上次中断的采集与分析任务，原始证据保持不变');
-    }
-    _refreshTimer = Timer.periodic(_maintenanceInterval, (_) {
-      unawaited(_runPeriodicMaintenance());
-    });
-    _safeNotify();
-    await _logger?.log(AppLogLevel.info, 'app.initialized');
-    await _refreshManagedLogSize();
-    if (_runtimeSettings.autoStartRecording &&
-        recordingStatus == RecordingViewStatus.stopped) {
-      await startCapture();
-    }
+  }
+
+  Future<void> _runInitializationHook(AppInitializationStage stage) async {
+    await _initializationStageHook?.call(stage);
   }
 
   @override
@@ -250,14 +328,31 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
   @override
   Future<void> startCapture() {
     if (_captureOperation != null ||
-        _nativeStopWait != null ||
         recordingStatus.isActive ||
         _activeSession != null ||
         _exiting ||
         _disposed) {
       return Future<void>.value();
     }
+    final nativeStopWait = _nativeStopWait;
+    if (nativeStopWait != null) {
+      return _runCaptureOperation(
+        () => _reconcileTimedOutStopAndStart(nativeStopWait),
+      );
+    }
     return _runCaptureOperation(_startCapture);
+  }
+
+  Future<void> _reconcileTimedOutStopAndStart(_NativeStopWait wait) async {
+    if (!await _reconcileNativeStop(wait)) return;
+    _setRecordingStatus(RecordingViewStatus.stopped);
+    _safeNotify();
+    if (_nativeStopWait == null &&
+        _activeSession == null &&
+        !_exiting &&
+        !_disposed) {
+      await _startCapture();
+    }
   }
 
   Future<void> _startCapture() async {
@@ -382,10 +477,14 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
     try {
       await _nativeService.stop();
       nativeStopAccepted = true;
-      await nativeStopWait.completion.future.timeout(
-        _stopTimeout,
-        onTimeout: () => throw TimeoutException('原生停止确认超时', _stopTimeout),
-      );
+      try {
+        await nativeStopWait.completion.future.timeout(
+          _stopTimeout,
+          onTimeout: () => throw TimeoutException('原生停止确认超时', _stopTimeout),
+        );
+      } on TimeoutException {
+        if (!await _reconcileNativeStop(nativeStopWait)) rethrow;
+      }
       final nativeStopFailure = nativeStopWait.failure;
       if (nativeStopFailure != null) throw nativeStopFailure;
       await _chunkSaveTail;
@@ -559,12 +658,13 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
         ? draft.apiKey
         : await _settingsService.readApiKey();
     if (key.isEmpty) throw StateError('没有可用的 API 密钥');
-    final service = OpenAiAnalysisService(
-      config: OpenAiAnalysisConfig(
+    final service = _analysisServiceBuilder(
+      OpenAiAnalysisConfig(
         baseUrl: draft.apiUrl,
         apiKey: key,
         model: draft.model,
         timeout: const Duration(seconds: 30),
+        maxAttempts: draft.analysisRetryCount + 1,
       ),
     );
     try {
@@ -572,6 +672,88 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
     } finally {
       service.close();
     }
+  }
+
+  @override
+  Future<void> checkForUpdates() {
+    final pending = _updateCheckOperation;
+    if (pending != null) return pending;
+    return _startUpdateCheck(manual: true);
+  }
+
+  Future<void> _startUpdateCheck({required bool manual}) {
+    final pending = _updateCheckOperation;
+    if (pending != null) return pending;
+    final service = _updateCheckService;
+    if (service == null) {
+      if (manual && !_disposed) {
+        update = UpdateViewData(
+          currentVersion: update.currentVersion,
+          latestVersion: update.latestVersion,
+          updateAvailable: update.updateAvailable,
+          lastChecked: update.lastChecked,
+          error: '当前环境无法检查更新',
+        );
+        _safeNotify();
+      }
+      return Future<void>.value();
+    }
+
+    final generation = ++_updateCheckGeneration;
+    update = UpdateViewData(
+      currentVersion: update.currentVersion,
+      latestVersion: update.latestVersion,
+      checking: true,
+      updateAvailable: update.updateAvailable,
+      lastChecked: update.lastChecked,
+    );
+    _safeNotify();
+
+    late final Future<void> operation;
+    operation =
+        _performUpdateCheck(
+          service: service,
+          generation: generation,
+          manual: manual,
+        ).whenComplete(() {
+          if (identical(_updateCheckOperation, operation)) {
+            _updateCheckOperation = null;
+          }
+        });
+    _updateCheckOperation = operation;
+    return operation;
+  }
+
+  Future<void> _performUpdateCheck({
+    required UpdateCheckService service,
+    required int generation,
+    required bool manual,
+  }) async {
+    final result = await service.check();
+    if (_disposed || generation != _updateCheckGeneration) return;
+    if (result.error != null) {
+      update = UpdateViewData(
+        currentVersion: update.currentVersion,
+        latestVersion: update.latestVersion,
+        updateAvailable: update.updateAvailable,
+        lastChecked: result.checkedAt,
+        error: manual ? result.error : null,
+      );
+    } else {
+      update = UpdateViewData(
+        currentVersion: result.currentVersion,
+        latestVersion: result.latestVersion,
+        updateAvailable: result.updateAvailable,
+        lastChecked: result.checkedAt,
+      );
+    }
+    _safeNotify();
+  }
+
+  @override
+  Future<void> openReleasesPage() async {
+    final opened = await _releasePageOpener(UpdateCheckService.releasesPageUri);
+    if (!opened) throw StateError('无法打开下载页面');
   }
 
   @override
@@ -682,24 +864,23 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
   Future<void> exitApplication() async {
     if (_exiting) return;
     _exiting = true;
-    _refreshTimer?.cancel();
-    _messageTimer?.cancel();
+    Object? cleanupFailure;
     try {
       final captureOperation = _captureOperation;
       if (captureOperation != null) {
         await captureOperation;
       }
       if (_activeSession != null) await stopCapture();
-      await _analysisCoordinator.stop();
-      await _settingsSaveTail;
-      await _nativeSubscription?.cancel();
-      await _database.close();
-      await _logger?.log(AppLogLevel.info, 'app.exiting');
-      await _logger?.close();
+      await _shutdownResources(logExit: true);
+    } on Object catch (error) {
+      cleanupFailure = error;
+      _setMessage('退出时清理资源失败：$error');
+    }
+    try {
       await _nativeService.requestExit();
     } on Object catch (error) {
-      _exiting = false;
-      _setMessage('退出时清理资源失败：$error');
+      final prefix = cleanupFailure == null ? '' : '资源清理未完全成功；';
+      _setMessage('$prefix请求退出失败：$error');
     }
   }
 
@@ -712,10 +893,7 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
         final nativeStopWait = _matchingNativeStopWait(event.sessionId);
         final stopWaitMatches = nativeStopWait != null;
         if (event.status == NativeCaptureStatus.stopped && stopWaitMatches) {
-          _nativeStopWait = null;
-          if (!nativeStopWait.completion.isCompleted) {
-            nativeStopWait.completion.complete();
-          }
+          _completeNativeStopWait(nativeStopWait);
         }
         if (!activeSessionMatches && !stopWaitMatches) return;
         if (event.status == NativeCaptureStatus.stopped &&
@@ -796,6 +974,42 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
             wait.generation == _captureGeneration
         ? wait
         : null;
+  }
+
+  Future<bool> _reconcileNativeStop(_NativeStopWait wait) async {
+    if (!identical(_nativeStopWait, wait) ||
+        wait.generation != _captureGeneration) {
+      return _nativeStopCompletedSuccessfully(wait);
+    }
+    try {
+      final state = await _nativeService.getState().timeout(
+        _stopReconciliationTimeout,
+      );
+      if (!identical(_nativeStopWait, wait) ||
+          wait.generation != _captureGeneration) {
+        return _nativeStopCompletedSuccessfully(wait);
+      }
+      if (state['status'] != NativeCaptureStatus.stopped.name ||
+          state['sessionId'] != wait.sessionId) {
+        return false;
+      }
+      _completeNativeStopWait(wait);
+      return true;
+    } on Object {
+      return _nativeStopCompletedSuccessfully(wait);
+    }
+  }
+
+  bool _nativeStopCompletedSuccessfully(_NativeStopWait wait) =>
+      _nativeStopWait == null &&
+      wait.generation == _captureGeneration &&
+      wait.completion.isCompleted &&
+      wait.failure == null;
+
+  void _completeNativeStopWait(_NativeStopWait wait) {
+    if (!identical(_nativeStopWait, wait)) return;
+    _nativeStopWait = null;
+    if (!wait.completion.isCompleted) wait.completion.complete();
   }
 
   void _finalizeUnexpectedNativeStop() {
@@ -894,11 +1108,12 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
   Future<OpenAiAnalysisService> _createAnalysisService() async {
     final key = await _settingsService.readApiKey();
     if (key.isEmpty) throw StateError('API 密钥未配置');
-    return OpenAiAnalysisService(
-      config: OpenAiAnalysisConfig(
+    return _analysisServiceBuilder(
+      OpenAiAnalysisConfig(
         baseUrl: _runtimeSettings.apiUrl,
         apiKey: key,
         model: _runtimeSettings.apiModel,
+        maxAttempts: _runtimeSettings.analysisRetryCount + 1,
       ),
     );
   }
@@ -1179,12 +1394,14 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
       logLevel: _runtimeSettings.logLevel,
       autoStartRecording: _runtimeSettings.autoStartRecording,
       launchAtLogin: _runtimeSettings.launchAtLogin,
+      analysisRetryCount: _runtimeSettings.analysisRetryCount,
     );
   }
 
   Future<void> _applyLogLevel(AppLogLevel level) async {
     final logger = _logger;
     if (logger != null) logger.level = level;
+    _nativeLoggingStarted = true;
     await _nativeService.configureLogging(
       level: level,
       logDirectory:
@@ -1263,6 +1480,7 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
       logLevel: draft.logLevel,
       autoStartRecording: draft.autoStartRecording,
       launchAtLogin: draft.launchAtLogin,
+      analysisRetryCount: draft.analysisRetryCount,
     );
     var launchAtLoginApplied = false;
     try {
@@ -1402,13 +1620,86 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
   @override
   void dispose() {
     _disposed = true;
+    _updateCheckGeneration++;
     _recordingTimer?.cancel();
     _refreshTimer?.cancel();
     _messageTimer?.cancel();
     unawaited(_nativeSubscription?.cancel());
+    _closeUpdateCheckService();
     super.dispose();
   }
+
+  Future<void> shutdown() => _shutdownResources(logExit: false);
+
+  Future<void> _shutdownResources({required bool logExit}) {
+    final existing = _shutdownOperation;
+    if (existing != null) return existing;
+    final operation = _performShutdown(logExit: logExit);
+    _shutdownOperation = operation;
+    return operation;
+  }
+
+  Future<void> _performShutdown({required bool logExit}) async {
+    _exiting = true;
+    _initialized = false;
+    _recordingTimer?.cancel();
+    _recordingTimer = null;
+    _refreshTimer?.cancel();
+    _refreshTimer = null;
+    _messageTimer?.cancel();
+    _messageTimer = null;
+    Object? firstFailure;
+
+    Future<void> attempt(Future<void> Function() action) async {
+      try {
+        await action();
+      } on Object catch (error) {
+        firstFailure ??= error;
+      }
+    }
+
+    if (_analysisCoordinatorInitialized) {
+      _analysisCoordinatorInitialized = false;
+      await attempt(_analysisCoordinator.stop);
+    }
+    await attempt(() async => _settingsSaveTail);
+    await attempt(() async => _trayStateTail);
+    final subscription = _nativeSubscription;
+    _nativeSubscription = null;
+    if (subscription != null) await attempt(subscription.cancel);
+    if (_databaseOpened || _database.isOpen) {
+      await attempt(_database.close);
+      _databaseOpened = false;
+    }
+    final logger = _logger;
+    if (logger != null && !_loggerClosed) {
+      if (logExit) {
+        await attempt(() => logger.log(AppLogLevel.info, 'app.exiting'));
+      }
+      await attempt(logger.close);
+      _loggerClosed = true;
+    }
+    _updateCheckGeneration++;
+    _closeUpdateCheckService();
+    if (_nativeLoggingStarted) {
+      _nativeLoggingStarted = false;
+      await attempt(_nativeService.closeLogging);
+    }
+    if (firstFailure != null) throw firstFailure!;
+  }
+
+  void _closeUpdateCheckService() {
+    if (_updateCheckServiceClosed) return;
+    _updateCheckServiceClosed = true;
+    _updateCheckService?.close();
+  }
 }
+
+Future<bool> _unsupportedReleasePageOpener(Uri uri) async => false;
+
+OpenAiAnalysisService _defaultAnalysisServiceBuilder(
+  OpenAiAnalysisConfig config,
+) => OpenAiAnalysisService(config: config);
 
 final class _NativeStopWait {
   _NativeStopWait({required this.sessionId, required this.generation});

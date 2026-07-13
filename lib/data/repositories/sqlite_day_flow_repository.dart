@@ -201,6 +201,7 @@ final class SqliteDayFlowRepository
     Set<ProcessingStatus>? statuses,
     int? dueAtMs,
     bool? evidencePurged,
+    int? afterId,
     int limit = 100,
   }) async {
     _requirePositiveLimit(limit);
@@ -221,12 +222,16 @@ final class SqliteDayFlowRepository
             : 'evidence_purged_at_ms IS NULL',
       );
     }
+    if (afterId != null) {
+      clauses.add('id > ?');
+      arguments.add(afterId);
+    }
     final db = await database.open();
     final rows = await db.query(
       'capture_chunks',
       where: clauses.isEmpty ? null : clauses.join(' AND '),
       whereArgs: arguments,
-      orderBy: 'started_at_ms ASC',
+      orderBy: afterId == null ? 'started_at_ms ASC' : 'id ASC',
       limit: limit,
     );
     return rows.map(_chunkFromRow).toList(growable: false);
@@ -342,20 +347,48 @@ final class SqliteDayFlowRepository
   }
 
   @override
+  Future<int> getMaxAnalysisBatchId() async {
+    final db = await database.open();
+    final rows = await db.rawQuery(
+      'SELECT COALESCE(MAX(id), 0) AS max_id FROM analysis_batches',
+    );
+    return rows.single['max_id']! as int;
+  }
+
+  @override
   Future<List<AnalysisBatch>> listBatches({
     Set<ProcessingStatus>? statuses,
+    int? afterId,
+    int? beforeOrAtId,
+    int? updatedBeforeOrAtMs,
     int limit = 100,
   }) async {
     _requirePositiveLimit(limit);
     final db = await database.open();
     final statusList = statuses?.toList(growable: false);
+    final clauses = <String>[];
+    final arguments = <Object?>[];
+    if (statusList != null && statusList.isNotEmpty) {
+      clauses.add('status IN (${_placeholders(statusList.length)})');
+      arguments.addAll(statusList.map((status) => status.name));
+    }
+    if (afterId != null) {
+      clauses.add('id > ?');
+      arguments.add(afterId);
+    }
+    if (beforeOrAtId != null) {
+      clauses.add('id <= ?');
+      arguments.add(beforeOrAtId);
+    }
+    if (updatedBeforeOrAtMs != null) {
+      clauses.add('updated_at_ms <= ?');
+      arguments.add(updatedBeforeOrAtMs);
+    }
     final rows = await db.query(
       'analysis_batches',
-      where: statusList == null || statusList.isEmpty
-          ? null
-          : 'status IN (${_placeholders(statusList.length)})',
-      whereArgs: statusList?.map((status) => status.name).toList(),
-      orderBy: 'created_at_ms ASC',
+      where: clauses.isEmpty ? null : clauses.join(' AND '),
+      whereArgs: arguments,
+      orderBy: afterId == null ? 'created_at_ms ASC' : 'id ASC',
       limit: limit,
     );
     final batches = <AnalysisBatch>[];
@@ -363,6 +396,39 @@ final class SqliteDayFlowRepository
       batches.add(await _batchFromRow(db, row));
     }
     return batches;
+  }
+
+  @override
+  Future<List<int>> listStandaloneFailedChunkIds({
+    required int updatedBeforeOrAtMs,
+    int? afterId,
+    int limit = 100,
+  }) async {
+    _requirePositiveLimit(limit);
+    final db = await database.open();
+    final rows = await db.rawQuery(
+      '''
+      SELECT chunks.id
+      FROM capture_chunks AS chunks
+      WHERE chunks.status = ?
+        AND chunks.updated_at_ms <= ?
+        AND chunks.id > ?
+        AND NOT EXISTS (
+          SELECT 1
+          FROM analysis_batch_chunks AS links
+          WHERE links.chunk_id = chunks.id
+        )
+      ORDER BY chunks.id ASC
+      LIMIT ?
+      ''',
+      <Object?>[
+        ProcessingStatus.failed.name,
+        updatedBeforeOrAtMs,
+        afterId ?? 0,
+        limit,
+      ],
+    );
+    return rows.map((row) => row['id']! as int).toList(growable: false);
   }
 
   @override

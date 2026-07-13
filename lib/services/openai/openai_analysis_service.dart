@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import '../../core/domain/api_url_validator.dart';
 import 'analysis_exception.dart';
 import 'analysis_models.dart';
 import 'chat_transport.dart';
@@ -269,7 +270,7 @@ final class OpenAiAnalysisService {
         lastError = AnalysisException(
           AnalysisFailureKind.network,
           '分析服务传输失败',
-          retryable: true,
+          retryable: false,
           cause: error,
         );
       }
@@ -331,7 +332,7 @@ final class OpenAiAnalysisService {
         config.maxImageFrames > 8 ||
         config.maxResponseBytes <= 0 ||
         config.maxAttempts < 1 ||
-        config.maxAttempts > 5 ||
+        config.maxAttempts > 6 ||
         config.retryBaseDelay.isNegative) {
       throw const AnalysisException(
         AnalysisFailureKind.configuration,
@@ -339,23 +340,11 @@ final class OpenAiAnalysisService {
       );
     }
 
-    final uri = Uri.tryParse(baseUrl);
-    final isLoopback =
-        uri != null &&
-        (uri.host == 'localhost' ||
-            uri.host == '127.0.0.1' ||
-            uri.host == '::1');
-    if (uri == null ||
-        (uri.scheme != 'https' && !(uri.scheme == 'http' && isLoopback)) ||
-        uri.host.isEmpty ||
-        uri.hasQuery ||
-        uri.hasFragment ||
-        uri.userInfo.isNotEmpty) {
-      throw const AnalysisException(
-        AnalysisFailureKind.configuration,
-        'API URL 必须是有效的 HTTP(S) 地址且不能包含查询、片段或用户信息',
-      );
+    final apiUrlError = validateApiBaseUrl(baseUrl);
+    if (apiUrlError != null) {
+      throw AnalysisException(AnalysisFailureKind.configuration, apiUrlError);
     }
+    final uri = Uri.parse(baseUrl);
 
     var endpointPath = uri.path.replaceFirst(RegExp(r'/+$'), '');
     if (!endpointPath.endsWith('/chat/completions')) {

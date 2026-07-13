@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import 'app.dart';
 import 'bootstrap.dart';
+import 'features/presentation/app_theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -39,6 +40,7 @@ class _StartupFailureApp extends StatelessWidget {
     return MaterialApp(
       title: 'Qi Day Flow',
       debugShowCheckedModeBanner: false,
+      theme: QiDayFlowTheme.light(),
       home: Scaffold(
         body: Center(
           child: ConstrainedBox(

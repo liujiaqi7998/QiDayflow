@@ -7,11 +7,15 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import '../core/platform/app_paths.dart';
 import '../data/local/app_database.dart';
 
+typedef MigrationDatabaseValidator =
+    Future<void> Function(String path, DatabaseFactory? databaseFactory);
+
 final class DataDirectoryService {
   DataDirectoryService({
     required String locatorDirectory,
     required String defaultUserDataDirectory,
     this.databaseFactory,
+    MigrationDatabaseValidator? databaseValidator,
   }) : _locatorDirectory = _absoluteWindowsPath(
          locatorDirectory,
          'locatorDirectory',
@@ -19,7 +23,8 @@ final class DataDirectoryService {
        _defaultUserDataDirectory = _absoluteWindowsPath(
          defaultUserDataDirectory,
          'defaultUserDataDirectory',
-       );
+       ),
+       _databaseValidator = databaseValidator ?? validateMigratedDatabase;
 
   static const _locatorVersion = 1;
   static const _locatorStem = '.qi_day_flow_data_location';
@@ -28,6 +33,7 @@ final class DataDirectoryService {
   final String _locatorDirectory;
   final String _defaultUserDataDirectory;
   final DatabaseFactory? databaseFactory;
+  final MigrationDatabaseValidator _databaseValidator;
 
   Future<AppPaths> resolvePaths() async {
     final stored = await _readLatestState();
@@ -92,6 +98,7 @@ final class DataDirectoryService {
       if (!markerMatches) {
         throw StateError('目标用户数据目录已包含数据库，未执行覆盖');
       }
+      await _databaseValidator(targetFile.path, databaseFactory);
       return;
     }
     if (!await sourceFile.exists()) {
@@ -137,6 +144,7 @@ final class DataDirectoryService {
           await file.close();
         }
       });
+      await _databaseValidator(temporary.path, databaseFactory);
       await temporary.rename(targetFile.path);
     } on Object {
       if (await temporary.exists()) {
@@ -214,6 +222,46 @@ final class DataDirectoryService {
       await marker.delete();
     }
   }
+}
+
+Future<void> validateMigratedDatabase(
+  String path,
+  DatabaseFactory? databaseFactory,
+) async {
+  final factory = databaseFactory ?? _defaultDatabaseFactory();
+  final database = await factory.openDatabase(
+    path,
+    options: OpenDatabaseOptions(readOnly: true, singleInstance: false),
+  );
+  try {
+    final quickCheck = await database.rawQuery('PRAGMA quick_check');
+    if (quickCheck.length != 1 || quickCheck.single.values.single != 'ok') {
+      throw const FormatException('迁移数据库完整性校验失败');
+    }
+    final foreignKeyViolations = await database.rawQuery(
+      'PRAGMA foreign_key_check',
+    );
+    if (foreignKeyViolations.isNotEmpty) {
+      throw const FormatException('迁移数据库外键校验失败');
+    }
+    final userVersionRows = await database.rawQuery('PRAGMA user_version');
+    final userVersion = userVersionRows.single.values.single;
+    final schemaVersionRows = await database.rawQuery(
+      'SELECT MAX(version) AS version FROM schema_version',
+    );
+    final schemaVersion = schemaVersionRows.single['version'];
+    if (userVersion != AppDatabase.schemaVersion ||
+        schemaVersion != AppDatabase.schemaVersion) {
+      throw const FormatException('迁移数据库版本不匹配');
+    }
+  } finally {
+    await database.close();
+  }
+}
+
+DatabaseFactory _defaultDatabaseFactory() {
+  sqfliteFfiInit();
+  return databaseFactoryFfi;
 }
 
 final class _LocatorState {

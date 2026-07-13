@@ -38,6 +38,7 @@ final class SecureSettingsService {
               !decoded.containsKey('logLevel') ||
               !decoded.containsKey('autoStartRecording') ||
               !decoded.containsKey('launchAtLogin') ||
+              !decoded.containsKey('analysisRetryCount') ||
               _nonEmpty(decoded['apiModel'] as String?) == null)) {
         await _repository.putSetting(
           _settingsKey,

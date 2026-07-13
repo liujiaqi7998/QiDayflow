@@ -35,5 +35,7 @@ void main() {
     expect(draft.launchAtLogin, isFalse);
     expect(viewData.autoStartRecording, isFalse);
     expect(viewData.launchAtLogin, isFalse);
+    expect(draft.analysisRetryCount, 3);
+    expect(viewData.analysisRetryCount, 3);
   });
 }

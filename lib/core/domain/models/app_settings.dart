@@ -1,4 +1,5 @@
 import '../validation.dart';
+import '../api_url_validator.dart';
 import 'package:path/path.dart' as p;
 
 enum AppThemeMode { system, light, dark }
@@ -24,26 +25,15 @@ final class AppSettings {
     this.logLevel = AppLogLevel.info,
     this.autoStartRecording = false,
     this.launchAtLogin = false,
+    this.analysisRetryCount = 3,
   }) : apiUrl = requireNonBlank(apiUrl, 'apiUrl'),
        apiModel = requireNonBlank(apiModel, 'apiModel'),
        userDataDirectory = _resolveUserDataDirectory(
          userDataDirectory: userDataDirectory,
          legacyCaptureDirectory: captureDirectory,
        ) {
-    final uri = Uri.tryParse(this.apiUrl);
-    final isLoopback =
-        uri != null &&
-        (uri.host == 'localhost' ||
-            uri.host == '127.0.0.1' ||
-            uri.host == '::1');
-    if (uri == null ||
-        uri.host.isEmpty ||
-        uri.hasQuery ||
-        uri.hasFragment ||
-        uri.userInfo.isNotEmpty ||
-        (uri.scheme != 'https' && !(uri.scheme == 'http' && isLoopback))) {
-      throw FormatException('apiUrl 必须使用 HTTPS，本机回环地址可使用 HTTP');
-    }
+    final apiUrlError = validateApiBaseUrl(this.apiUrl);
+    if (apiUrlError != null) throw FormatException(apiUrlError);
     if (cacheLimitGb < 1 || cacheLimitGb > 50) {
       throw RangeError.range(cacheLimitGb, 1, 50, 'cacheLimitGb');
     }
@@ -65,6 +55,9 @@ final class AppSettings {
         'chunkDurationSeconds',
       );
     }
+    if (analysisRetryCount < 0 || analysisRetryCount > 5) {
+      throw RangeError.range(analysisRetryCount, 0, 5, 'analysisRetryCount');
+    }
   }
 
   factory AppSettings.fromJson(Object? value) {
@@ -85,6 +78,7 @@ final class AppSettings {
       'logLevel',
       'autoStartRecording',
       'launchAtLogin',
+      'analysisRetryCount',
     };
     final json = strictJsonObject(value, 'settings', allowedKeys: keys);
     return AppSettings(
@@ -112,6 +106,9 @@ final class AppSettings {
       launchAtLogin: json.containsKey('launchAtLogin')
           ? jsonBool(json, 'launchAtLogin')
           : false,
+      analysisRetryCount: json.containsKey('analysisRetryCount')
+          ? jsonInt(json, 'analysisRetryCount')
+          : 3,
     );
   }
 
@@ -142,6 +139,7 @@ final class AppSettings {
   final AppLogLevel logLevel;
   final bool autoStartRecording;
   final bool launchAtLogin;
+  final int analysisRetryCount;
 
   bool get apiKeyConfigured => apiKeyCiphertext?.isNotEmpty ?? false;
 
@@ -161,6 +159,7 @@ final class AppSettings {
     'logLevel': logLevel.name,
     'autoStartRecording': autoStartRecording,
     'launchAtLogin': launchAtLogin,
+    'analysisRetryCount': analysisRetryCount,
   };
 
   AppSettings copyWith({
@@ -179,6 +178,7 @@ final class AppSettings {
     AppLogLevel? logLevel,
     bool? autoStartRecording,
     bool? launchAtLogin,
+    int? analysisRetryCount,
   }) => AppSettings(
     apiUrl: apiUrl ?? this.apiUrl,
     apiModel: apiModel ?? this.apiModel,
@@ -200,6 +200,7 @@ final class AppSettings {
     logLevel: logLevel ?? this.logLevel,
     autoStartRecording: autoStartRecording ?? this.autoStartRecording,
     launchAtLogin: launchAtLogin ?? this.launchAtLogin,
+    analysisRetryCount: analysisRetryCount ?? this.analysisRetryCount,
   );
 }
 

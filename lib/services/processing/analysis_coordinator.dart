@@ -12,6 +12,8 @@ import 'chunk_evidence.dart';
 typedef AnalysisServiceFactory = Future<OpenAiAnalysisService> Function();
 
 class AnalysisCoordinator {
+  static const int _retryPageSize = 100;
+
   AnalysisCoordinator({
     required CaptureRepository captureRepository,
     required AnalysisRepository analysisRepository,
@@ -35,9 +37,18 @@ class AnalysisCoordinator {
 
   final Queue<int> _retryBatchIds = Queue<int>();
   final Set<int> _queuedRetryBatchIds = <int>{};
+  final Queue<int> _retryChunkIds = Queue<int>();
   Future<void>? _worker;
+  Future<void>? _retryInitialization;
   OpenAiAnalysisService? _activeService;
   bool _stopping = false;
+  bool _retryScanActive = false;
+  bool _retryBatchScanComplete = false;
+  bool _retryChunkScanComplete = false;
+  int _retryBatchCursor = 0;
+  int _retryBatchUpperBound = 0;
+  int _retryChunkCursor = 0;
+  int _retryRequestedAtMs = 0;
 
   bool get isRunning => _worker != null;
 
@@ -56,30 +67,40 @@ class AnalysisCoordinator {
   }
 
   Future<void> retryFailed() async {
-    final failedBatches = await _analysisRepository.listBatches(
-      statuses: const <ProcessingStatus>{ProcessingStatus.failed},
-      limit: 100000,
-    );
-    final batchedChunkIds = <int>{};
-    for (final batch in failedBatches) {
-      batchedChunkIds.addAll(batch.chunkIds);
-      final id = batch.id!;
-      if (await _analysisRepository.retryBatch(id) &&
-          _queuedRetryBatchIds.add(id)) {
-        _retryBatchIds.add(id);
-      }
+    final existingInitialization = _retryInitialization;
+    if (existingInitialization != null) {
+      await existingInitialization;
+      return;
+    }
+    if (_retryScanActive) {
+      onChanged?.call();
+      schedule();
+      return;
     }
 
-    final failedChunks = await _captureRepository.listChunks(
-      statuses: const <ProcessingStatus>{ProcessingStatus.failed},
-      limit: 100000,
-    );
-    for (final chunk in failedChunks) {
-      final id = chunk.id!;
-      if (!batchedChunkIds.contains(id)) {
-        await _captureRepository.retryChunk(id);
+    final initialization = _initializeRetryScan();
+    _retryInitialization = initialization;
+    try {
+      await initialization;
+    } finally {
+      if (identical(_retryInitialization, initialization)) {
+        _retryInitialization = null;
       }
     }
+  }
+
+  Future<void> _initializeRetryScan() async {
+    final requestedAtMs = DateTime.now().toUtc().millisecondsSinceEpoch;
+    final batchUpperBound = await _analysisRepository.getMaxAnalysisBatchId();
+    if (_stopping) return;
+
+    _retryBatchScanComplete = false;
+    _retryChunkScanComplete = false;
+    _retryBatchCursor = 0;
+    _retryBatchUpperBound = batchUpperBound;
+    _retryChunkCursor = 0;
+    _retryRequestedAtMs = requestedAtMs;
+    _retryScanActive = true;
     onChanged?.call();
     schedule();
   }
@@ -91,7 +112,9 @@ class AnalysisCoordinator {
   }
 
   Future<void> _scheduleAgainIfNeeded() async {
-    if (_retryBatchIds.isNotEmpty) {
+    if (_retryBatchIds.isNotEmpty ||
+        _retryChunkIds.isNotEmpty ||
+        _retryScanActive) {
       schedule();
       return;
     }
@@ -105,27 +128,90 @@ class AnalysisCoordinator {
 
   Future<void> _drain() async {
     while (!_stopping) {
+      if (_retryBatchIds.isEmpty &&
+          _retryChunkIds.isEmpty &&
+          _retryScanActive) {
+        await _refillRetryWork();
+      }
       if (_retryBatchIds.isNotEmpty) {
         final batchId = _retryBatchIds.removeFirst();
         _queuedRetryBatchIds.remove(batchId);
         await _processBatch(batchId);
         onChanged?.call();
+        await _processOneFreshChunk();
         continue;
       }
-
-      final pending = await _captureRepository.listChunks(
-        statuses: const <ProcessingStatus>{ProcessingStatus.pending},
-        dueAtMs: DateTime.now().toUtc().millisecondsSinceEpoch,
-        limit: 1,
-      );
-      if (pending.isEmpty) return;
-      final batch = await _analysisRepository.claimChunksForAnalysis(<int>[
-        pending.single.id!,
-      ]);
-      onChanged?.call();
-      await _processBatch(batch.id!);
-      onChanged?.call();
+      if (_retryChunkIds.isNotEmpty) {
+        final chunkId = _retryChunkIds.removeFirst();
+        if (await _captureRepository.retryChunk(chunkId)) {
+          final batch = await _analysisRepository.claimChunksForAnalysis(<int>[
+            chunkId,
+          ]);
+          onChanged?.call();
+          await _processBatch(batch.id!);
+          onChanged?.call();
+        }
+        await _processOneFreshChunk();
+        continue;
+      }
+      if (!await _processOneFreshChunk()) return;
     }
+  }
+
+  Future<void> _refillRetryWork() async {
+    while (_retryBatchIds.isEmpty && !_retryBatchScanComplete) {
+      final page = await _analysisRepository.listBatches(
+        statuses: const <ProcessingStatus>{ProcessingStatus.failed},
+        afterId: _retryBatchCursor,
+        beforeOrAtId: _retryBatchUpperBound,
+        updatedBeforeOrAtMs: _retryRequestedAtMs,
+        limit: _retryPageSize,
+      );
+      for (final batch in page) {
+        final id = batch.id!;
+        _retryBatchCursor = id;
+        if (await _analysisRepository.retryBatch(id) &&
+            _queuedRetryBatchIds.add(id)) {
+          _retryBatchIds.add(id);
+        }
+      }
+      if (page.length < _retryPageSize) _retryBatchScanComplete = true;
+    }
+    if (_retryBatchIds.isNotEmpty || !_retryBatchScanComplete) return;
+    if (_retryChunkScanComplete) {
+      _retryScanActive = false;
+      return;
+    }
+
+    final chunkIds = await _analysisRepository.listStandaloneFailedChunkIds(
+      updatedBeforeOrAtMs: _retryRequestedAtMs,
+      afterId: _retryChunkCursor,
+      limit: _retryPageSize,
+    );
+    for (final id in chunkIds) {
+      _retryChunkCursor = id;
+      _retryChunkIds.add(id);
+    }
+    if (chunkIds.length < _retryPageSize) {
+      _retryChunkScanComplete = true;
+      if (_retryChunkIds.isEmpty) _retryScanActive = false;
+    }
+  }
+
+  Future<bool> _processOneFreshChunk() async {
+    final pending = await _captureRepository.listChunks(
+      statuses: const <ProcessingStatus>{ProcessingStatus.pending},
+      dueAtMs: DateTime.now().toUtc().millisecondsSinceEpoch,
+      limit: 1,
+    );
+    if (pending.isEmpty) return false;
+    final batch = await _analysisRepository.claimChunksForAnalysis(<int>[
+      pending.single.id!,
+    ]);
+    onChanged?.call();
+    await _processBatch(batch.id!);
+    onChanged?.call();
+    return true;
   }
 
   Future<void> _processBatch(int batchId) async {

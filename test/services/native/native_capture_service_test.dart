@@ -80,6 +80,42 @@ void main() {
     expect(calls.last.arguments, <String, Object>{'enabled': false});
   });
 
+  test(
+    'application version and HTTPS opener use narrow channel contracts',
+    () async {
+      const channel = MethodChannel('qi_day_flow/test/application-info');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      final calls = <MethodCall>[];
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        calls.add(call);
+        return call.method == 'queryApplicationVersion' ? '0.1.0+1' : true;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      final service = NativeCaptureService(methodChannel: channel);
+
+      expect(await service.queryApplicationVersion(), '0.1.0+1');
+      expect(
+        await service.openExternalUrl(
+          Uri.parse('https://github.com/example/releases'),
+        ),
+        isTrue,
+      );
+
+      expect(calls.first.method, 'queryApplicationVersion');
+      expect(calls.first.arguments, isNull);
+      expect(calls.last.method, 'openExternalUrl');
+      expect(calls.last.arguments, <String, Object>{
+        'url': 'https://github.com/example/releases',
+      });
+      await expectLater(
+        service.openExternalUrl(Uri.parse('http://example.test/releases')),
+        throwsArgumentError,
+      );
+      expect(calls, hasLength(2));
+    },
+  );
+
   test('capture configuration sends an integer capture interval', () {
     const configuration = NativeCaptureConfiguration(
       outputDirectory: r'C:\QiDayFlow\captures',

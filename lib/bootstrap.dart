@@ -5,6 +5,7 @@ import 'services/native/native_capture_service.dart';
 import 'services/data_directory_service.dart';
 import 'services/logging/app_logger.dart';
 import 'services/secure_settings_service.dart';
+import 'services/update/update_check_service.dart';
 
 Future<AppController> bootstrapApplication() async {
   final defaultPaths = await AppPaths.create();
@@ -22,6 +23,13 @@ Future<AppController> bootstrapApplication() async {
     platform: nativeService,
     defaultUserDataDirectory: paths.userDataDirectory,
   );
+  UpdateCheckService? updateCheckService;
+  try {
+    final currentVersion = await nativeService.queryApplicationVersion();
+    updateCheckService = UpdateCheckService(currentVersion: currentVersion);
+  } on Object {
+    updateCheckService = null;
+  }
   final controller = AppController(
     database: database,
     repository: repository,
@@ -30,6 +38,8 @@ Future<AppController> bootstrapApplication() async {
     dataDirectoryService: dataDirectoryService,
     activeUserDataDirectory: paths.userDataDirectory,
     logger: logger,
+    updateCheckService: updateCheckService,
+    releasePageOpener: nativeService.openExternalUrl,
   );
   await controller.initialize();
   return controller;

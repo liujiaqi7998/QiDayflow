@@ -51,6 +51,29 @@ void main() {
       }
     },
   );
+
+  test(
+    'stored settings missing retry count are migrated and persisted',
+    () async {
+      final legacy = AppSettings.defaults(
+        captureDirectory: r'C:\QiDayFlow\captures',
+      ).toJson()..remove('analysisRetryCount');
+      final repository = _MemorySettingsRepository(<String, String>{
+        'app_settings': jsonEncode(legacy),
+      });
+      final service = SecureSettingsService(
+        repository: repository,
+        platform: NativeCaptureService(),
+        defaultUserDataDirectory: r'C:\QiDayFlow',
+      );
+
+      final loaded = await service.load();
+      final persisted = jsonDecode(repository.values['app_settings']!) as Map;
+
+      expect(loaded.analysisRetryCount, 3);
+      expect(persisted['analysisRetryCount'], 3);
+    },
+  );
 }
 
 final class _MemorySettingsRepository implements SettingsRepository {

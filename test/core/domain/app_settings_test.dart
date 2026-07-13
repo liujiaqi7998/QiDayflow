@@ -207,4 +207,66 @@ void main() {
       );
     });
   });
+
+  group('analysis retry count', () {
+    test('defaults to three retries and migrates missing JSON', () {
+      final defaults = AppSettings.defaults(
+        captureDirectory: r'D:\Qi Day Flow\captures',
+      );
+      final legacyJson = Map<String, Object?>.of(defaults.toJson())
+        ..remove('analysisRetryCount');
+
+      expect(defaults.analysisRetryCount, 3);
+      expect(AppSettings.fromJson(legacyJson).analysisRetryCount, 3);
+    });
+
+    test('round-trips and copies every supported retry count', () {
+      final defaults = AppSettings.defaults(
+        captureDirectory: r'D:\Qi Day Flow\captures',
+      );
+
+      for (var count = 0; count <= 5; count++) {
+        final settings = defaults.copyWith(analysisRetryCount: count);
+        expect(settings.analysisRetryCount, count);
+        expect(settings.toJson()['analysisRetryCount'], count);
+        expect(
+          AppSettings.fromJson(settings.toJson()).analysisRetryCount,
+          count,
+        );
+      }
+    });
+
+    test('constructor, copyWith, and fromJson reject out of range values', () {
+      final defaults = AppSettings.defaults(
+        captureDirectory: r'D:\Qi Day Flow\captures',
+      );
+      for (final count in <int>[-1, 6]) {
+        expect(
+          () => AppSettings(
+            apiUrl: defaults.apiUrl,
+            apiModel: defaults.apiModel,
+            userDataDirectory: defaults.userDataDirectory,
+            cacheLimitGb: defaults.cacheLimitGb,
+            idlePauseEnabled: defaults.idlePauseEnabled,
+            idlePauseSeconds: defaults.idlePauseSeconds,
+            chunkDurationSeconds: defaults.chunkDurationSeconds,
+            themeMode: defaults.themeMode,
+            analysisRetryCount: count,
+          ),
+          throwsRangeError,
+        );
+        expect(
+          () => defaults.copyWith(analysisRetryCount: count),
+          throwsRangeError,
+        );
+        expect(
+          () => AppSettings.fromJson(<String, Object?>{
+            ...defaults.toJson(),
+            'analysisRetryCount': count,
+          }),
+          throwsRangeError,
+        );
+      }
+    });
+  });
 }

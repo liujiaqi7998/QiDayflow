@@ -64,11 +64,12 @@ class QiDayFlowTheme {
       ThemeData(brightness: brightness).textTheme.apply(
         bodyColor: scheme.onSurface,
         displayColor: scheme.onSurface,
-        fontFamily: 'Segoe UI',
+        fontFamily: 'MiSans',
       ),
     );
     return ThemeData(
       useMaterial3: true,
+      fontFamily: 'MiSans',
       brightness: brightness,
       colorScheme: scheme,
       scaffoldBackgroundColor: isDark

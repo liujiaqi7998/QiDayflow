@@ -30,10 +30,12 @@ class _SettingsPageState extends State<SettingsPage> {
   late AppLogLevel _logLevel;
   late bool _autoStartRecording;
   late bool _launchAtLogin;
+  late int _analysisRetryCount;
   bool _showApiKey = false;
   bool _loadingApiKey = true;
   bool _apiKeyLoadFailed = false;
   bool _apiKeyDirty = false;
+  bool _testingApiConnection = false;
   bool _pendingTextSave = false;
   int _settingsSaveRevision = 0;
   Timer? _saveDebounce;
@@ -54,6 +56,7 @@ class _SettingsPageState extends State<SettingsPage> {
     _logLevel = value.logLevel;
     _autoStartRecording = value.autoStartRecording;
     _launchAtLogin = value.launchAtLogin;
+    _analysisRetryCount = value.analysisRetryCount;
     unawaited(_loadApiKey());
   }
 
@@ -106,6 +109,7 @@ class _SettingsPageState extends State<SettingsPage> {
     apiKeyChanged: _apiKeyDirty,
     autoStartRecording: _autoStartRecording,
     launchAtLogin: _launchAtLogin,
+    analysisRetryCount: _analysisRetryCount,
   );
 
   bool _draftLooksValid() =>
@@ -147,6 +151,9 @@ class _SettingsPageState extends State<SettingsPage> {
         if (_launchAtLogin == draft.launchAtLogin) {
           _launchAtLogin = widget.viewModel.settings.launchAtLogin;
         }
+        if (_analysisRetryCount == draft.analysisRetryCount) {
+          _analysisRetryCount = widget.viewModel.settings.analysisRetryCount;
+        }
       });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -180,6 +187,7 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _testConnection() async {
+    if (_testingApiConnection) return;
     final urlError = _validateApiUrl(_apiUrl.text);
     final missingModel = _model.text.trim().isEmpty;
     final missingKey =
@@ -190,11 +198,16 @@ class _SettingsPageState extends State<SettingsPage> {
       ).showSnackBar(const SnackBar(content: Text('请先填写有效的 API 配置')));
       return;
     }
-    await _run(
-      () => widget.viewModel.testApiConnection(_draft()),
-      '连接成功',
-      validateForm: false,
-    );
+    setState(() => _testingApiConnection = true);
+    try {
+      await _run(
+        () => widget.viewModel.testApiConnection(_draft()),
+        '连接成功',
+        validateForm: false,
+      );
+    } finally {
+      if (mounted) setState(() => _testingApiConnection = false);
+    }
   }
 
   Future<void> _chooseUserDataDirectory() async {
@@ -220,6 +233,17 @@ class _SettingsPageState extends State<SettingsPage> {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('打开用户数据目录失败：$error'), showCloseIcon: true),
+      );
+    }
+  }
+
+  Future<void> _openReleasesPage() async {
+    try {
+      await widget.viewModel.openReleasesPage();
+    } on Object catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('打开下载页面失败：$error'), showCloseIcon: true),
       );
     }
   }
@@ -311,14 +335,93 @@ class _SettingsPageState extends State<SettingsPage> {
                   icon: Icons.cloud_outlined,
                   child: Column(
                     children: [
-                      TextFormField(
-                        controller: _apiUrl,
-                        onChanged: (_) => _scheduleTextSave(),
-                        decoration: const InputDecoration(
-                          labelText: 'API URL',
-                          hintText: 'https://api.openai.com/v1',
-                        ),
-                        validator: _validateApiUrl,
+                      LayoutBuilder(
+                        builder: (context, constraints) {
+                          final apiUrlField = TextFormField(
+                            key: const ValueKey('settings-api-url'),
+                            controller: _apiUrl,
+                            onChanged: (_) => _scheduleTextSave(),
+                            decoration: const InputDecoration(
+                              labelText: 'API URL',
+                              hintText: 'https://api.openai.com/v1',
+                            ),
+                            validator: _validateApiUrl,
+                          );
+                          final retryDropdown = DropdownButton<int>(
+                            key: const ValueKey(
+                              'settings-analysis-retry-count',
+                            ),
+                            value: _analysisRetryCount,
+                            items: List<DropdownMenuItem<int>>.generate(
+                              6,
+                              (count) => DropdownMenuItem<int>(
+                                value: count,
+                                child: Text('$count 次'),
+                              ),
+                            ),
+                            onChanged: (value) {
+                              if (value == null ||
+                                  value == _analysisRetryCount) {
+                                return;
+                              }
+                              setState(() => _analysisRetryCount = value);
+                              _saveImmediately();
+                            },
+                          );
+                          final retryTitle = Text(
+                            'AI 分析失败后重试次数',
+                            style: Theme.of(context).textTheme.bodySmall,
+                          );
+                          const retryHelp = Expanded(
+                            child: Text('0 表示不重试；3 表示失败后最多重试 3 次，总尝试最多 4 次。'),
+                          );
+                          final narrow = constraints.maxWidth < 650;
+                          final retryControl = Semantics(
+                            container: true,
+                            label: 'AI 分析失败后重试次数，当前 $_analysisRetryCount 次',
+                            child: narrow
+                                ? Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      retryTitle,
+                                      Row(
+                                        children: [
+                                          retryDropdown,
+                                          const SizedBox(width: 10),
+                                          retryHelp,
+                                        ],
+                                      ),
+                                    ],
+                                  )
+                                : Row(
+                                    children: [
+                                      retryTitle,
+                                      const SizedBox(width: 8),
+                                      retryDropdown,
+                                      const SizedBox(width: 10),
+                                      retryHelp,
+                                    ],
+                                  ),
+                          );
+                          if (narrow) {
+                            return Column(
+                              children: [
+                                apiUrlField,
+                                const SizedBox(height: 12),
+                                retryControl,
+                              ],
+                            );
+                          }
+                          return Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(child: apiUrlField),
+                              const SizedBox(width: 16),
+                              Expanded(child: retryControl),
+                            ],
+                          );
+                        },
                       ),
                       const SizedBox(height: 12),
                       LayoutBuilder(
@@ -395,9 +498,19 @@ class _SettingsPageState extends State<SettingsPage> {
                       Align(
                         alignment: Alignment.centerLeft,
                         child: OutlinedButton.icon(
-                          onPressed: vm.savingSettings ? null : _testConnection,
-                          icon: const Icon(Icons.network_check),
-                          label: const Text('测试连接'),
+                          key: const ValueKey('settings-test-api-connection'),
+                          onPressed: vm.savingSettings || _testingApiConnection
+                              ? null
+                              : _testConnection,
+                          icon: _testingApiConnection
+                              ? const SizedBox.square(
+                                  dimension: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.network_check),
+                          label: Text(_testingApiConnection ? '正在测试' : '测试连接'),
                         ),
                       ),
                     ],
@@ -814,6 +927,70 @@ class _SettingsPageState extends State<SettingsPage> {
                     ],
                   ),
                 ),
+                _SettingsSection(
+                  title: '软件更新',
+                  icon: Icons.system_update_alt,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text('当前版本 ${vm.update.currentVersion}'),
+                      const SizedBox(height: 6),
+                      Text(
+                        vm.update.checking
+                            ? '正在检查更新'
+                            : vm.update.error != null
+                            ? '检查失败：${vm.update.error}'
+                            : vm.update.updateAvailable
+                            ? '发现新版本 ${vm.update.latestVersion}'
+                            : vm.update.latestVersion != null
+                            ? '已是最新版 ${vm.update.latestVersion}'
+                            : '尚未检查更新',
+                        key: const ValueKey('settings-update-status'),
+                        style: vm.update.error == null
+                            ? null
+                            : TextStyle(
+                                color: Theme.of(context).colorScheme.error,
+                              ),
+                      ),
+                      if (vm.update.lastChecked case final checkedAt?) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          '上次检查 ${_formatCheckedAt(checkedAt)}',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ],
+                      const SizedBox(height: 12),
+                      Wrap(
+                        spacing: 10,
+                        runSpacing: 10,
+                        children: [
+                          OutlinedButton.icon(
+                            key: const ValueKey('settings-check-update'),
+                            onPressed: vm.update.checking
+                                ? null
+                                : () => unawaited(vm.checkForUpdates()),
+                            icon: vm.update.checking
+                                ? const SizedBox.square(
+                                    dimension: 16,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(Icons.refresh),
+                            label: Text(vm.update.checking ? '正在检查' : '检查更新'),
+                          ),
+                          if (vm.update.updateAvailable)
+                            FilledButton.icon(
+                              key: const ValueKey('settings-open-releases'),
+                              onPressed: _openReleasesPage,
+                              icon: const Icon(Icons.open_in_new),
+                              label: const Text('前往下载'),
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
               ],
             ),
           ),
@@ -827,14 +1004,15 @@ String? _required(String? value) {
   return value == null || value.trim().isEmpty ? '此项不能为空' : null;
 }
 
+String _formatCheckedAt(DateTime value) {
+  String twoDigits(int part) => part.toString().padLeft(2, '0');
+  final local = value.toLocal();
+  return '${local.year}-${twoDigits(local.month)}-${twoDigits(local.day)} '
+      '${twoDigits(local.hour)}:${twoDigits(local.minute)}';
+}
+
 String? _validateApiUrl(String? value) {
-  if (value == null || value.trim().isEmpty) return '请输入 API URL';
-  final uri = Uri.tryParse(value.trim());
-  if (uri == null || uri.host.isEmpty) return 'API URL 无效';
-  if (uri.scheme != 'https' && uri.scheme != 'http') {
-    return '请输入 HTTP(S) 地址';
-  }
-  return null;
+  return validateApiBaseUrl(value);
 }
 
 class _SettingsSection extends StatelessWidget {
