@@ -364,8 +364,7 @@ final class StatisticsService {
     Map<DateTime, Map<String, int>> target,
   ) {
     var cursor = DateTime(start.year, start.month, start.day);
-    final boundary = DateTime(end.year, end.month, end.day);
-    while (cursor.isBefore(boundary)) {
+    while (cursor.isBefore(end)) {
       target.putIfAbsent(cursor, () => <String, int>{});
       cursor = DateTime(cursor.year, cursor.month, cursor.day + 1);
     }

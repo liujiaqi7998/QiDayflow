@@ -131,6 +131,198 @@ void main() {
     },
   );
 
+  test(
+    'stop waits for the native stopped event without blocking its request',
+    () async {
+      final harness = await _ControllerHarness.create();
+      addTearDown(harness.dispose);
+      await harness.controller.initialize();
+      await harness.controller.startCapture();
+      harness.native.autoEmitStopped = false;
+
+      var completed = false;
+      final stop = harness.controller.stopCapture().whenComplete(() {
+        completed = true;
+      });
+      await _waitFor(() => harness.native.stopCalls == 1);
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+
+      expect(harness.controller.recordingStatus, RecordingViewStatus.stopping);
+      expect(completed, isFalse);
+      harness.native.emitState(NativeCaptureStatus.stopped);
+      await stop;
+      expect(harness.controller.recordingStatus, RecordingViewStatus.stopped);
+    },
+  );
+
+  test(
+    'non-recoverable native stop error completes without an async leak',
+    () async {
+      final harness = await _ControllerHarness.create();
+      addTearDown(harness.dispose);
+      await harness.controller.initialize();
+      await harness.controller.startCapture();
+      harness.native.autoEmitStopped = false;
+
+      final stop = harness.controller.stopCapture();
+      await _waitFor(() => harness.native.stopCalls == 1);
+      harness.native.emitError('finalize failed');
+      await stop;
+
+      expect(harness.controller.recordingStatus, RecordingViewStatus.error);
+      expect(harness.controller.statusMessage, contains('finalize failed'));
+    },
+  );
+
+  test(
+    'stop timeout reports an error and a late stopped event recovers',
+    () async {
+      final harness = await _ControllerHarness.create(
+        stopTimeout: const Duration(milliseconds: 50),
+      );
+      addTearDown(harness.dispose);
+      await harness.controller.initialize();
+      await harness.controller.startCapture();
+      harness.native.autoEmitStopped = false;
+
+      await harness.controller.stopCapture();
+
+      expect(harness.controller.recordingStatus, RecordingViewStatus.error);
+      expect(harness.controller.statusMessage, contains('停止采集失败'));
+      harness.native.emitState(NativeCaptureStatus.stopped);
+      await _flushEvents();
+      expect(harness.controller.recordingStatus, RecordingViewStatus.stopped);
+    },
+  );
+
+  test('native state query clears a timed-out stop tombstone', () async {
+    final harness = await _ControllerHarness.create(
+      stopTimeout: const Duration(milliseconds: 50),
+    );
+    addTearDown(harness.dispose);
+    await harness.controller.initialize();
+    await harness.controller.startCapture();
+    harness.native.autoEmitStopped = false;
+    harness.native.queriedStatus = NativeCaptureStatus.stopped;
+
+    await harness.controller.stopCapture();
+    await harness.controller.startCapture();
+
+    expect(harness.native.stateQueries, 1);
+    expect(harness.native.startCalls, 2);
+    expect(harness.controller.recordingStatus, RecordingViewStatus.recording);
+  });
+
+  test(
+    'fatal error followed by stopped finalizes the active session',
+    () async {
+      final harness = await _ControllerHarness.create();
+      addTearDown(harness.dispose);
+      await harness.controller.initialize();
+      await harness.controller.startCapture();
+
+      harness.native.emitError('capture pipeline failed');
+      harness.native.emitState(NativeCaptureStatus.stopped);
+      await _flushEvents();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await harness.controller.startCapture();
+
+      expect(harness.native.startCalls, 2);
+      expect(harness.controller.recordingStatus, RecordingViewStatus.recording);
+    },
+  );
+
+  test(
+    'late old session events cannot unblock or overwrite a newer session',
+    () async {
+      final harness = await _ControllerHarness.create(
+        stopTimeout: const Duration(milliseconds: 50),
+      );
+      addTearDown(harness.dispose);
+      await harness.controller.initialize();
+      await harness.controller.startCapture();
+      final oldSessionId = harness.native.currentSessionId!;
+      harness.native.autoEmitStopped = false;
+
+      await harness.controller.stopCapture();
+      expect(harness.controller.recordingStatus, RecordingViewStatus.error);
+
+      await harness.controller.startCapture();
+      expect(harness.native.startCalls, 1);
+
+      harness.native.emitState(
+        NativeCaptureStatus.stopped,
+        sessionId: oldSessionId,
+      );
+      await _flushEvents();
+      await harness.controller.startCapture();
+      final newSessionId = harness.native.currentSessionId!;
+      expect(harness.native.startCalls, 2);
+      expect(newSessionId, isNot(oldSessionId));
+      expect(harness.controller.recordingStatus, RecordingViewStatus.recording);
+
+      harness.native.emitState(
+        NativeCaptureStatus.stopped,
+        sessionId: oldSessionId,
+      );
+      harness.native.emitError('late old failure', sessionId: oldSessionId);
+      await _flushEvents();
+      expect(harness.controller.recordingStatus, RecordingViewStatus.recording);
+      expect(
+        harness.controller.statusMessage,
+        isNot(contains('late old failure')),
+      );
+
+      var stopCompleted = false;
+      final stop = harness.controller.stopCapture().whenComplete(() {
+        stopCompleted = true;
+      });
+      await _waitFor(() => harness.native.stopCalls == 2);
+      harness.native.emitState(
+        NativeCaptureStatus.stopped,
+        sessionId: oldSessionId,
+      );
+      await _flushEvents();
+      expect(stopCompleted, isFalse);
+      expect(harness.controller.recordingStatus, RecordingViewStatus.stopping);
+
+      harness.native.emitState(
+        NativeCaptureStatus.stopped,
+        sessionId: newSessionId,
+      );
+      await stop;
+      expect(harness.controller.recordingStatus, RecordingViewStatus.stopped);
+    },
+  );
+
+  test(
+    'matching fatal error clears a timed-out native stop tombstone',
+    () async {
+      final harness = await _ControllerHarness.create(
+        stopTimeout: const Duration(milliseconds: 50),
+      );
+      addTearDown(harness.dispose);
+      await harness.controller.initialize();
+      await harness.controller.startCapture();
+      final stoppedSessionId = harness.native.currentSessionId!;
+      harness.native.autoEmitStopped = false;
+
+      await harness.controller.stopCapture();
+      await harness.controller.startCapture();
+      expect(harness.native.startCalls, 1);
+
+      harness.native.emitError(
+        'late fatal stop failure',
+        sessionId: stoppedSessionId,
+      );
+      await _flushEvents();
+      await harness.controller.startCapture();
+
+      expect(harness.native.startCalls, 2);
+      expect(harness.controller.recordingStatus, RecordingViewStatus.recording);
+    },
+  );
+
   test('tray callbacks are ignored after controller disposal', () async {
     final harness = await _ControllerHarness.create();
     await harness.controller.initialize();
@@ -168,7 +360,9 @@ final class _ControllerHarness {
     required this.controller,
   });
 
-  static Future<_ControllerHarness> create() async {
+  static Future<_ControllerHarness> create({
+    Duration stopTimeout = const Duration(seconds: 15),
+  }) async {
     final root = await Directory.systemTemp.createTemp('qi_tray_controller_');
     final captures = Directory(p.join(root.path, 'captures'));
     await captures.create();
@@ -188,6 +382,7 @@ final class _ControllerHarness {
         defaultCaptureDirectory: captures.path,
       ),
       activeUserDataDirectory: root.path,
+      stopTimeout: stopTimeout,
     );
     return _ControllerHarness(
       root: root,
@@ -227,6 +422,10 @@ final class _FakeNativeCaptureService extends NativeCaptureService {
   Completer<void>? startGate;
   Completer<void>? stopGate;
   bool failNextStart = false;
+  bool autoEmitStopped = true;
+  String? currentSessionId;
+  NativeCaptureStatus queriedStatus = NativeCaptureStatus.stopping;
+  int stateQueries = 0;
 
   @override
   Stream<NativeCaptureEvent> get events => _events.stream;
@@ -235,8 +434,24 @@ final class _FakeNativeCaptureService extends NativeCaptureService {
     _events.add(NativeTrayCommandEvent(command: command));
   }
 
-  void emitState(NativeCaptureStatus status) {
-    _events.add(NativeCaptureStateEvent(status: status));
+  void emitState(NativeCaptureStatus status, {String? sessionId}) {
+    _events.add(
+      NativeCaptureStateEvent(
+        status: status,
+        sessionId: sessionId ?? currentSessionId!,
+      ),
+    );
+  }
+
+  void emitError(String message, {String? sessionId}) {
+    _events.add(
+      NativeCaptureErrorEvent(
+        code: 'testStopFailure',
+        message: message,
+        recoverable: false,
+        sessionId: sessionId ?? currentSessionId!,
+      ),
+    );
   }
 
   @override
@@ -255,6 +470,7 @@ final class _FakeNativeCaptureService extends NativeCaptureService {
   @override
   Future<void> start(NativeCaptureConfiguration configuration) async {
     startCalls++;
+    currentSessionId = configuration.sessionId;
     await startGate?.future;
     startGate = null;
     if (failNextStart) {
@@ -268,6 +484,16 @@ final class _FakeNativeCaptureService extends NativeCaptureService {
     stopCalls++;
     await stopGate?.future;
     stopGate = null;
+    if (autoEmitStopped) emitState(NativeCaptureStatus.stopped);
+  }
+
+  @override
+  Future<Map<Object?, Object?>> getState() async {
+    stateQueries++;
+    return <Object?, Object?>{
+      'status': queriedStatus.name,
+      'sessionId': currentSessionId,
+    };
   }
 
   Future<void> close() => _events.close();

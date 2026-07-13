@@ -3,10 +3,15 @@
 #include <windows.h>
 
 #include "flutter_window.h"
+#include "startup_behavior.h"
 #include "utils.h"
 
 int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
                       _In_ wchar_t *command_line, _In_ int show_command) {
+  std::vector<std::string> command_line_arguments =
+      GetCommandLineArguments();
+  const bool start_in_background =
+      qi_day_flow::HasBackgroundArgument(command_line_arguments);
   HANDLE single_instance =
       CreateMutexW(nullptr, TRUE, L"Local\\QiDayFlow.SingleInstance.v1");
   if (single_instance != nullptr && GetLastError() == ERROR_ALREADY_EXISTS) {
@@ -19,7 +24,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
         Sleep(100);
       }
     }
-    if (existing_window != nullptr) {
+    if (existing_window != nullptr && !start_in_background) {
       ShowWindow(existing_window, SW_RESTORE);
       SetForegroundWindow(existing_window);
       FlashWindow(existing_window, TRUE);
@@ -42,12 +47,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   flutter::DartProject project(L"data");
 
-  std::vector<std::string> command_line_arguments =
-      GetCommandLineArguments();
-
   project.set_dart_entrypoint_arguments(std::move(command_line_arguments));
 
-  FlutterWindow window(project);
+  FlutterWindow window(project, start_in_background);
   Win32Window::Point origin(10, 10);
   Win32Window::Size size(1280, 720);
   if (!window.Create(L"Qi Day Flow", origin, size)) {

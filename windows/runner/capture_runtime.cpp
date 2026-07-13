@@ -49,6 +49,13 @@ DeadlineAdvance AdvanceDeadlinePast(int64_t deadline_ms,
 
 }  // namespace
 
+CaptureStopPlan PlanCaptureStop(bool already_stopped) {
+  if (already_stopped) {
+    return {};
+  }
+  return CaptureStopPlan{true, true, false};
+}
+
 CaptureWorkerAction DecideCaptureWorkerAction(bool stop_requested,
                                               bool manual_paused,
                                               bool idle_paused,

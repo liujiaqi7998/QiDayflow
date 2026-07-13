@@ -215,8 +215,10 @@ class ChunkEvidenceReader {
           video['frameRateDenominator'] != captureIntervalSeconds ||
           video['frameDurationTicks'] != captureIntervalSeconds * 10000000 ||
           frameCount >
-              (durationMs + captureIntervalSeconds * 1000 - 1) ~/
-                  (captureIntervalSeconds * 1000)) {
+              calculateMaximumChunkFrameCount(
+                durationMs: durationMs,
+                captureIntervalSeconds: captureIntervalSeconds,
+              )) {
         throw const FormatException('schema 4 视频规格无效');
       }
     }

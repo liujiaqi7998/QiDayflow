@@ -1,6 +1,7 @@
 #include "native_bridge.h"
 
 #include "capture_runtime.h"
+#include "startup_behavior.h"
 
 #include <flutter/event_stream_handler_functions.h>
 #include <flutter/standard_method_codec.h>
@@ -36,8 +37,202 @@ using Microsoft::WRL::ComPtr;
 constexpr char kMethodChannelName[] = "qi_day_flow/platform";
 constexpr char kEventChannelName[] = "qi_day_flow/capture_events";
 constexpr char kEntropy[] = "QiDayFlow.DPAPI.v1";
+constexpr wchar_t kRunRegistryPath[] =
+    L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+constexpr wchar_t kRunValueName[] = L"QiDayFlow";
 
 std::wstring WideFromUtf8(const std::string& value);
+
+LSTATUS CanonicalExecutablePath(std::wstring* path) {
+  if (path == nullptr) {
+    return ERROR_INVALID_PARAMETER;
+  }
+  std::vector<wchar_t> buffer(32768);
+  const DWORD length = GetModuleFileNameW(
+      nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+  if (length == 0) {
+    const DWORD error = GetLastError();
+    return error == ERROR_SUCCESS ? ERROR_BAD_PATHNAME : error;
+  }
+  if (length >= buffer.size()) {
+    return ERROR_INSUFFICIENT_BUFFER;
+  }
+  std::error_code path_error;
+  const std::filesystem::path canonical = std::filesystem::canonical(
+      std::filesystem::path(std::wstring(buffer.data(), length)), path_error);
+  if (path_error || canonical.empty()) {
+    return ERROR_BAD_PATHNAME;
+  }
+  *path = canonical.native();
+  return ERROR_SUCCESS;
+}
+
+LSTATUS ReadLaunchAtLoginCommand(HKEY key, bool* exists,
+                                 std::wstring* command) {
+  if (key == nullptr || exists == nullptr || command == nullptr) {
+    return ERROR_INVALID_PARAMETER;
+  }
+  *exists = false;
+  command->clear();
+  DWORD type = 0;
+  DWORD byte_count = 0;
+  LSTATUS status = RegQueryValueExW(key, kRunValueName, nullptr, &type,
+                                    nullptr, &byte_count);
+  if (status == ERROR_FILE_NOT_FOUND) {
+    return ERROR_SUCCESS;
+  }
+  if (status != ERROR_SUCCESS) {
+    return status;
+  }
+  *exists = true;
+  if (type != REG_SZ || byte_count == 0 ||
+      byte_count % sizeof(wchar_t) != 0 ||
+      byte_count > 32768 * sizeof(wchar_t)) {
+    return ERROR_INVALID_DATA;
+  }
+  std::vector<wchar_t> value(byte_count / sizeof(wchar_t) + 1, L'\0');
+  DWORD loaded_type = 0;
+  DWORD loaded_bytes = byte_count;
+  status = RegQueryValueExW(
+      key, kRunValueName, nullptr, &loaded_type,
+      reinterpret_cast<BYTE*>(value.data()), &loaded_bytes);
+  if (status != ERROR_SUCCESS) {
+    return status;
+  }
+  if (loaded_type != REG_SZ || loaded_bytes == 0 ||
+      loaded_bytes % sizeof(wchar_t) != 0) {
+    return ERROR_INVALID_DATA;
+  }
+  command->assign(value.data(), loaded_bytes / sizeof(wchar_t));
+  if (!command->empty() && command->back() == L'\0') {
+    command->pop_back();
+  }
+  return ERROR_SUCCESS;
+}
+
+LSTATUS QueryLaunchAtLogin(bool* enabled) {
+  if (enabled == nullptr) {
+    return ERROR_INVALID_PARAMETER;
+  }
+  *enabled = false;
+  std::wstring executable_path;
+  const LSTATUS path_status = CanonicalExecutablePath(&executable_path);
+  if (path_status != ERROR_SUCCESS) {
+    return path_status;
+  }
+
+  HKEY key = nullptr;
+  LSTATUS status = RegOpenKeyExW(HKEY_CURRENT_USER, kRunRegistryPath, 0,
+                                 KEY_QUERY_VALUE, &key);
+  if (status == ERROR_FILE_NOT_FOUND) {
+    return ERROR_SUCCESS;
+  }
+  if (status != ERROR_SUCCESS) {
+    return status;
+  }
+
+  bool exists = false;
+  std::wstring command;
+  status = ReadLaunchAtLoginCommand(key, &exists, &command);
+  RegCloseKey(key);
+  if (status == ERROR_INVALID_DATA) {
+    return ERROR_SUCCESS;
+  }
+  if (status != ERROR_SUCCESS) {
+    return status;
+  }
+  *enabled = exists &&
+             IsExpectedLaunchAtLoginCommand(command, executable_path);
+  return ERROR_SUCCESS;
+}
+
+LSTATUS SetLaunchAtLogin(bool enabled) {
+  if (!enabled) {
+    HKEY key = nullptr;
+    LSTATUS status = RegOpenKeyExW(HKEY_CURRENT_USER, kRunRegistryPath, 0,
+                                   KEY_QUERY_VALUE | KEY_SET_VALUE, &key);
+    if (status == ERROR_FILE_NOT_FOUND) {
+      return ERROR_SUCCESS;
+    }
+    if (status != ERROR_SUCCESS) {
+      return status;
+    }
+    bool exists = false;
+    std::wstring command;
+    status = ReadLaunchAtLoginCommand(key, &exists, &command);
+    if (status == ERROR_INVALID_DATA) {
+      RegCloseKey(key);
+      return ERROR_REVISION_MISMATCH;
+    }
+    if (status != ERROR_SUCCESS || !exists) {
+      RegCloseKey(key);
+      return status;
+    }
+    std::wstring executable_path;
+    status = CanonicalExecutablePath(&executable_path);
+    if (status != ERROR_SUCCESS) {
+      RegCloseKey(key);
+      return status;
+    }
+    const LaunchAtLoginRemovalDecision decision = DecideLaunchAtLoginRemoval(
+        true, command, executable_path);
+    if (decision == LaunchAtLoginRemovalDecision::kConflict) {
+      RegCloseKey(key);
+      return ERROR_REVISION_MISMATCH;
+    }
+    if (decision == LaunchAtLoginRemovalDecision::kAlreadyAbsent) {
+      RegCloseKey(key);
+      return ERROR_SUCCESS;
+    }
+    status = RegDeleteValueW(key, kRunValueName);
+    RegCloseKey(key);
+    return status == ERROR_FILE_NOT_FOUND ? ERROR_SUCCESS : status;
+  }
+
+  std::wstring executable_path;
+  LSTATUS status = CanonicalExecutablePath(&executable_path);
+  if (status != ERROR_SUCCESS) {
+    return status;
+  }
+  const std::wstring command = BuildLaunchAtLoginCommand(executable_path);
+  if (command.empty()) {
+    return ERROR_INVALID_DATA;
+  }
+  HKEY key = nullptr;
+  status = RegCreateKeyExW(HKEY_CURRENT_USER, kRunRegistryPath, 0, nullptr, 0,
+                           KEY_QUERY_VALUE | KEY_SET_VALUE, nullptr, &key,
+                           nullptr);
+  if (status != ERROR_SUCCESS) {
+    return status;
+  }
+  bool exists = false;
+  std::wstring current_command;
+  status = ReadLaunchAtLoginCommand(key, &exists, &current_command);
+  if (status == ERROR_INVALID_DATA) {
+    RegCloseKey(key);
+    return ERROR_REVISION_MISMATCH;
+  }
+  if (status != ERROR_SUCCESS) {
+    RegCloseKey(key);
+    return status;
+  }
+  const LaunchAtLoginWriteDecision decision = DecideLaunchAtLoginWrite(
+      exists, current_command, executable_path);
+  if (decision == LaunchAtLoginWriteDecision::kConflict) {
+    RegCloseKey(key);
+    return ERROR_REVISION_MISMATCH;
+  }
+  if (decision == LaunchAtLoginWriteDecision::kAlreadyExpected) {
+    RegCloseKey(key);
+    return ERROR_SUCCESS;
+  }
+  const DWORD bytes =
+      static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t));
+  status = RegSetValueExW(key, kRunValueName, 0, REG_SZ,
+                          reinterpret_cast<const BYTE*>(command.c_str()), bytes);
+  RegCloseKey(key);
+  return status;
+}
 
 bool ValidateExecutablePath(const std::string& utf8_path,
                             std::filesystem::path* canonical_path,
@@ -1027,11 +1222,15 @@ void NativeBridge::HandleMethodCall(
     Put(&capabilities, "dpapi", EncodableValue(true));
     Put(&capabilities, "foregroundWindowTracking", EncodableValue(true));
     Put(&capabilities, "idleDetection", EncodableValue("GetLastInputInfo"));
-    Put(&capabilities, "defaultFps", EncodableValue(1.0));
+    Put(&capabilities, "defaultCaptureIntervalSeconds",
+        EncodableValue(static_cast<int32_t>(kDefaultCaptureIntervalSeconds)));
+    Put(&capabilities, "defaultFps",
+        EncodableValue(kDefaultCaptureFramesPerSecond));
     Put(&capabilities, "defaultChunkDurationSeconds", EncodableValue(60));
     Put(&capabilities, "videoWidth", EncodableValue(1920));
     Put(&capabilities, "videoHeight", EncodableValue(1080));
-    Put(&capabilities, "regularChunkFrameCount", EncodableValue(60));
+    Put(&capabilities, "regularChunkFrameCount",
+        EncodableValue(static_cast<int32_t>(kDefaultRegularChunkFrameCount)));
     Put(&capabilities, "chunkFormat", EncodableValue("h264-mp4+json"));
     Put(&capabilities, "maximumExtractedFrames", EncodableValue(8));
     result->Success(EncodableValue(std::move(capabilities)));
@@ -1083,6 +1282,49 @@ void NativeBridge::HandleMethodCall(
 
   if (method == "closeLogging") {
     frame_logger_.Close();
+    result->Success();
+    return;
+  }
+
+  if (method == "queryLaunchAtLogin") {
+    if (call.arguments() != nullptr && !call.arguments()->IsNull()) {
+      result->Error("invalid_arguments",
+                    "queryLaunchAtLogin does not accept arguments");
+      return;
+    }
+    bool enabled = false;
+    const LSTATUS status = QueryLaunchAtLogin(&enabled);
+    if (status != ERROR_SUCCESS) {
+      result->Error("launch_at_login_query_failed",
+                    "The launch-at-login registry value could not be read",
+                    EncodableValue(static_cast<int64_t>(status)));
+      return;
+    }
+    result->Success(EncodableValue(enabled));
+    return;
+  }
+
+  if (method == "setLaunchAtLogin") {
+    const EncodableValue* enabled_value = Find(arguments, "enabled");
+    if (arguments == nullptr || arguments->size() != 1 ||
+        enabled_value == nullptr || enabled_value->IsNull() ||
+        !std::holds_alternative<bool>(*enabled_value)) {
+      result->Error("invalid_arguments",
+                    "setLaunchAtLogin requires one boolean enabled field");
+      return;
+    }
+    const LSTATUS status =
+        SetLaunchAtLogin(std::get<bool>(*enabled_value));
+    if (status != ERROR_SUCCESS) {
+      const bool conflict = status == ERROR_REVISION_MISMATCH;
+      result->Error(conflict ? "launch_at_login_conflict"
+                             : "launch_at_login_update_failed",
+                    conflict
+                        ? "The launch-at-login value is owned by another command"
+                        : "The launch-at-login registry value could not be updated",
+                    EncodableValue(static_cast<int64_t>(status)));
+      return;
+    }
     result->Success();
     return;
   }

@@ -108,6 +108,14 @@ bool TestTopologyChangeKeepsChunkProgress() {
 }
 
 bool TestSupportedIntervalsAndVideoTiming() {
+  if (!Expect(qi_day_flow::kDefaultCaptureIntervalSeconds == 10,
+              "default capture interval was not 10 seconds") ||
+      !Expect(qi_day_flow::kDefaultCaptureFramesPerSecond == 0.1,
+              "compatibility default FPS was not 0.1") ||
+      !Expect(qi_day_flow::kDefaultRegularChunkFrameCount == 6,
+              "default regular chunk frame count was not 6")) {
+    return false;
+  }
   const uint32_t intervals[] = {1, 10, 20, 30};
   const uint32_t expected_frames[] = {60, 6, 3, 2};
   for (size_t index = 0; index < 4; ++index) {
@@ -535,6 +543,36 @@ bool TestInvalidCpuIntervalsAndMemoryCommit() {
                 "failed memory query must be unavailable");
 }
 
+bool TestDefaultCaptureScheduleUsesTenSeconds() {
+  qi_day_flow::CaptureSchedule schedule;
+  schedule.Reset(0);
+  const qi_day_flow::CaptureScheduleDecision initial = schedule.Poll(0);
+  const qi_day_flow::CaptureScheduleDecision one_second = schedule.Poll(1'000);
+  const qi_day_flow::CaptureScheduleDecision ten_seconds =
+      schedule.Poll(10'000);
+  return Expect(initial.capture_frame, "default schedule missed initial frame") &&
+         Expect(!one_second.capture_frame,
+                "default schedule still captured every second") &&
+         Expect(ten_seconds.capture_frame,
+                "default schedule did not capture at ten seconds");
+}
+
+bool TestStopPlanNeverJoinsWorkerOnPlatformThread() {
+  const qi_day_flow::CaptureStopPlan active =
+      qi_day_flow::PlanCaptureStop(false);
+  const qi_day_flow::CaptureStopPlan stopped =
+      qi_day_flow::PlanCaptureStop(true);
+  return Expect(active.accepted, "active stop request was rejected") &&
+         Expect(active.request_stop, "active stop did not signal the worker") &&
+         Expect(!active.join_worker,
+                "active stop attempted to join on the platform thread") &&
+         Expect(!stopped.accepted, "already-stopped request was accepted") &&
+         Expect(!stopped.request_stop,
+                "already-stopped request signaled the worker") &&
+         Expect(!stopped.join_worker,
+                "already-stopped request attempted to join the worker");
+}
+
 }  // namespace
 
 int main() {
@@ -579,6 +617,12 @@ int main() {
   }
   if (!TestInvalidCpuIntervalsAndMemoryCommit()) {
     return 14;
+  }
+  if (!TestDefaultCaptureScheduleUsesTenSeconds()) {
+    return 15;
+  }
+  if (!TestStopPlanNeverJoinsWorkerOnPlatformThread()) {
+    return 16;
   }
   std::cout << "capture runtime state and resource calculations passed\n";
   return 0;

@@ -36,6 +36,8 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
     AppLogger? logger,
     ManagedLogService? managedLogService,
     Duration maintenanceInterval = const Duration(seconds: 30),
+    Duration stopTimeout = const Duration(seconds: 15),
+    DateTime Function()? now,
   }) : _database = database,
        _repository = repository,
        _nativeService = nativeService,
@@ -53,6 +55,8 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
              ),
            ),
        _maintenanceInterval = maintenanceInterval,
+       _stopTimeout = stopTimeout,
+       _now = now ?? DateTime.now,
        _evidenceStore = EvidenceStore(nativeService: nativeService) {
     if (maintenanceInterval <= Duration.zero) {
       throw ArgumentError.value(
@@ -61,10 +65,14 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
         '必须大于零',
       );
     }
+    if (stopTimeout <= Duration.zero) {
+      throw ArgumentError.value(stopTimeout, 'stopTimeout', '必须大于零');
+    }
     _cacheRotationService = CacheRotationService(
       captureRepository: repository,
       evidenceStore: _evidenceStore,
     );
+    timelineDate = _now();
   }
 
   final AppDatabase _database;
@@ -76,6 +84,8 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
   final AppLogger? _logger;
   final ManagedLogService _managedLogService;
   final Duration _maintenanceInterval;
+  final Duration _stopTimeout;
+  final DateTime Function() _now;
   final StatisticsService _statisticsService = const StatisticsService();
   final EvidenceStore _evidenceStore;
   late final CacheRotationService _cacheRotationService;
@@ -88,6 +98,11 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
   Future<void> _settingsSaveTail = Future<void>.value();
   Future<void> _trayStateTail = Future<void>.value();
   Future<void>? _captureOperation;
+  _NativeStopWait? _nativeStopWait;
+  int _captureGeneration = 0;
+  int? _activeCaptureGeneration;
+  int? _pendingTerminalErrorGeneration;
+  String? _pendingTerminalError;
   Future<void>? _managedLogClearOperation;
   int _latestSettingsSaveRevision = 0;
   Timer? _recordingTimer;
@@ -111,7 +126,7 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
   @override
   String? statusMessage;
   @override
-  DateTime timelineDate = DateTime.now();
+  late DateTime timelineDate;
   @override
   List<TimelineCardViewData> timelineCards = const [];
   @override
@@ -159,6 +174,14 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
       },
     );
     _runtimeSettings = await _settingsService.load();
+    try {
+      final launchAtLogin = await _nativeService.queryLaunchAtLogin();
+      _runtimeSettings = _runtimeSettings.copyWith(
+        launchAtLogin: launchAtLogin,
+      );
+    } on Object catch (error) {
+      _setMessage('读取开机自启动设置失败：$error');
+    }
     await _applyLogLevel(_runtimeSettings.logLevel);
     await _queueTrayCaptureState(recordingStatus);
     final dataDirectoryService = _dataDirectoryService;
@@ -207,6 +230,10 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
     _safeNotify();
     await _logger?.log(AppLogLevel.info, 'app.initialized');
     await _refreshManagedLogSize();
+    if (_runtimeSettings.autoStartRecording &&
+        recordingStatus == RecordingViewStatus.stopped) {
+      await startCapture();
+    }
   }
 
   @override
@@ -229,6 +256,16 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
         _disposed) {
       return Future<void>.value();
     }
+    final nativeStopWait = _nativeStopWait;
+    if (nativeStopWait != null) {
+      return _runCaptureOperation(() async {
+        if (await _reconcileNativeStop(nativeStopWait)) {
+          await _startCapture();
+        } else {
+          _setMessage('原生采集仍在停止，请稍后重试');
+        }
+      });
+    }
     return _runCaptureOperation(_startCapture);
   }
 
@@ -242,7 +279,7 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
       await Directory(
         _runtimeSettings.captureDirectory,
       ).create(recursive: true);
-      final now = DateTime.now().toUtc().millisecondsSinceEpoch;
+      final now = _now().toUtc().millisecondsSinceEpoch;
       session = await _repository.createSession(
         CaptureSession(
           captureScope: activeWindowDisplayCaptureScope,
@@ -253,6 +290,9 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
         ),
       );
       _activeSession = session;
+      _activeCaptureGeneration = ++_captureGeneration;
+      _pendingTerminalErrorGeneration = null;
+      _pendingTerminalError = null;
       _recordingStartedAtMs = now;
       await _nativeService.start(
         NativeCaptureConfiguration(
@@ -270,8 +310,7 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
         final started = _recordingStartedAtMs;
         if (started != null) {
           recordingDuration = Duration(
-            milliseconds:
-                DateTime.now().toUtc().millisecondsSinceEpoch - started,
+            milliseconds: _now().toUtc().millisecondsSinceEpoch - started,
           );
           _safeNotify();
         }
@@ -293,6 +332,7 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
         }
       }
       _activeSession = null;
+      _activeCaptureGeneration = null;
       _recordingStartedAtMs = null;
       _setMessage('启动采集失败：$error');
     }
@@ -342,16 +382,36 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
   Future<void> _stopCapture(CaptureSession session) async {
     _setRecordingStatus(RecordingViewStatus.stopping);
     _safeNotify();
+    final nativeStopWait = _NativeStopWait(
+      sessionId: '${session.id}',
+      generation: _activeCaptureGeneration!,
+    );
+    _nativeStopWait = nativeStopWait;
+    var nativeStopAccepted = false;
     try {
       await _nativeService.stop();
+      nativeStopAccepted = true;
+      try {
+        await nativeStopWait.completion.future.timeout(
+          _stopTimeout,
+          onTimeout: () => throw TimeoutException('原生停止确认超时', _stopTimeout),
+        );
+      } on TimeoutException {
+        if (!await _reconcileNativeStop(nativeStopWait)) rethrow;
+      }
+      final nativeStopFailure = nativeStopWait.failure;
+      if (nativeStopFailure != null) throw nativeStopFailure;
       await _chunkSaveTail;
       await _repository.updateSessionStatus(
         session.id!,
         CaptureSessionStatus.stopped,
-        endedAtMs: DateTime.now().toUtc().millisecondsSinceEpoch,
+        endedAtMs: _now().toUtc().millisecondsSinceEpoch,
       );
       _setRecordingStatus(RecordingViewStatus.stopped);
     } on Object catch (error) {
+      if (!nativeStopAccepted && identical(_nativeStopWait, nativeStopWait)) {
+        _nativeStopWait = null;
+      }
       _setRecordingStatus(RecordingViewStatus.error);
       await _repository.updateSessionStatus(
         session.id!,
@@ -363,16 +423,31 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
       _recordingTimer?.cancel();
       _recordingTimer = null;
       _activeSession = null;
+      _activeCaptureGeneration = null;
       _recordingStartedAtMs = null;
     }
     if (_hasApiKey) _analysisCoordinator.schedule();
     await _refreshDerivedData();
   }
 
+  Future<bool> _reconcileNativeStop(_NativeStopWait wait) async {
+    if (!identical(_nativeStopWait, wait)) return true;
+    try {
+      final state = await _nativeService.getState().timeout(_stopTimeout);
+      final status = state['status'] ?? state['state'];
+      if (status != 'stopped') return false;
+      if (identical(_nativeStopWait, wait)) _nativeStopWait = null;
+      if (!wait.completion.isCompleted) wait.completion.complete();
+      return true;
+    } on Object {
+      return false;
+    }
+  }
+
   @override
   Future<void> setTimelineDate(DateTime date) async {
     final normalized = DateTime(date.year, date.month, date.day);
-    final now = DateTime.now();
+    final now = _now();
     final today = DateTime(now.year, now.month, now.day);
     timelineDate = normalized.isAfter(today) ? today : normalized;
     await Future.wait([_refreshTimeline(), _loadReport()]);
@@ -456,7 +531,7 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
 
   @override
   Future<void> setStatisticsDays(int days) async {
-    if (days != 7 && days != 30) return;
+    if (days != 1 && days != 7 && days != 30) return;
     statisticsDays = days;
     await _refreshStatistics();
   }
@@ -481,31 +556,28 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
 
   @override
   Future<void> updateLogLevel(AppLogLevel level) {
-    final previous = _runtimeSettings.logLevel;
-    if (level == previous) return Future<void>.value();
-    final revision = _beginSettingsSave();
-    final immediateConfiguration = _applyLogLevel(level);
+    if (level == _runtimeSettings.logLevel) return Future<void>.value();
     return _enqueueSettingsSave((revision) async {
+      _runtimeSettings = await _settingsService.save(
+        _runtimeSettings.copyWith(logLevel: level),
+      );
+      if (revision != _latestSettingsSaveRevision) return;
+      _syncSettingsView();
       try {
-        await immediateConfiguration;
-        _runtimeSettings = await _settingsService.save(
-          _runtimeSettings.copyWith(logLevel: level),
-        );
-        if (revision == _latestSettingsSaveRevision) {
-          _syncSettingsView();
-        }
+        await _applyLogLevel(level);
+      } on Object catch (error) {
+        _setMessage('日志级别应用失败：$error');
+      }
+      try {
         await _logger?.log(
           AppLogLevel.info,
           'logging.level_changed',
           fields: <String, Object?>{'level': level.name.toUpperCase()},
         );
-      } on Object {
-        if (revision == _latestSettingsSaveRevision) {
-          await _applyLogLevel(previous);
-        }
-        rethrow;
+      } on Object catch (error) {
+        _setMessage('日志级别变更记录失败：$error');
       }
-    }, reservedRevision: revision);
+    });
   }
 
   @override
@@ -661,6 +733,24 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
   void _handleNativeEvent(NativeCaptureEvent event) {
     switch (event) {
       case NativeCaptureStateEvent():
+        final activeSessionMatches = _eventMatchesActiveSession(
+          event.sessionId,
+        );
+        final nativeStopWait = _matchingNativeStopWait(event.sessionId);
+        final stopWaitMatches = nativeStopWait != null;
+        if (event.status == NativeCaptureStatus.stopped && stopWaitMatches) {
+          _nativeStopWait = null;
+          if (!nativeStopWait.completion.isCompleted) {
+            nativeStopWait.completion.complete();
+          }
+        }
+        if (!activeSessionMatches && !stopWaitMatches) return;
+        if (event.status == NativeCaptureStatus.stopped &&
+            activeSessionMatches &&
+            !stopWaitMatches) {
+          _finalizeUnexpectedNativeStop();
+          return;
+        }
         _setRecordingStatus(switch (event.status) {
           NativeCaptureStatus.stopped => RecordingViewStatus.stopped,
           NativeCaptureStatus.starting => RecordingViewStatus.starting,
@@ -686,9 +776,26 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
         }
         _safeNotify();
       case NativeChunkCompletedEvent():
+        if (!_eventMatchesActiveSession(event.sessionId)) return;
         _chunkSaveTail = _chunkSaveTail.then((_) => _saveNativeChunk(event));
       case NativeCaptureErrorEvent():
+        final activeSessionMatches = _eventMatchesActiveSession(
+          event.sessionId,
+        );
+        final nativeStopWait = _matchingNativeStopWait(event.sessionId);
+        final stopWaitMatches = nativeStopWait != null;
+        if (!activeSessionMatches && !stopWaitMatches) return;
         if (!event.recoverable) {
+          if (stopWaitMatches) {
+            nativeStopWait.failure = StateError(event.message);
+            _nativeStopWait = null;
+            if (!nativeStopWait.completion.isCompleted) {
+              nativeStopWait.completion.complete();
+            }
+          } else if (activeSessionMatches) {
+            _pendingTerminalErrorGeneration = _activeCaptureGeneration;
+            _pendingTerminalError = event.message;
+          }
           _setRecordingStatus(RecordingViewStatus.error);
         }
         _setMessage('原生采集错误：${event.message}');
@@ -702,10 +809,73 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
     }
   }
 
+  bool _eventMatchesActiveSession(String? sessionId) {
+    final session = _activeSession;
+    return session?.id != null &&
+        _activeCaptureGeneration != null &&
+        sessionId == '${session!.id}';
+  }
+
+  _NativeStopWait? _matchingNativeStopWait(String? sessionId) {
+    final wait = _nativeStopWait;
+    return wait != null &&
+            wait.sessionId == sessionId &&
+            wait.generation == _captureGeneration
+        ? wait
+        : null;
+  }
+
+  void _finalizeUnexpectedNativeStop() {
+    final session = _activeSession;
+    final generation = _activeCaptureGeneration;
+    if (session?.id == null || generation == null) return;
+    final terminalError = _pendingTerminalErrorGeneration == generation
+        ? _pendingTerminalError
+        : null;
+    _activeCaptureGeneration = null;
+    _pendingTerminalErrorGeneration = null;
+    _pendingTerminalError = null;
+    _recordingTimer?.cancel();
+    _recordingTimer = null;
+    _recordingStartedAtMs = null;
+    _setRecordingStatus(
+      terminalError == null
+          ? RecordingViewStatus.stopped
+          : RecordingViewStatus.error,
+    );
+    _safeNotify();
+    unawaited(_completeUnexpectedNativeStop(session!, terminalError));
+  }
+
+  Future<void> _completeUnexpectedNativeStop(
+    CaptureSession session,
+    String? terminalError,
+  ) async {
+    try {
+      await _chunkSaveTail;
+      await _repository.updateSessionStatus(
+        session.id!,
+        terminalError == null
+            ? CaptureSessionStatus.stopped
+            : CaptureSessionStatus.failed,
+        endedAtMs: _now().toUtc().millisecondsSinceEpoch,
+        errorMessage: terminalError,
+      );
+    } on Object catch (error) {
+      _setMessage('终结异常采集会话失败：$error');
+    } finally {
+      if (_activeSession?.id == session.id &&
+          _activeCaptureGeneration == null) {
+        _activeSession = null;
+      }
+      _safeNotify();
+    }
+  }
+
   Future<void> _saveNativeChunk(NativeChunkCompletedEvent event) async {
     try {
       final sessionId = int.parse(event.sessionId);
-      final now = DateTime.now().toUtc().millisecondsSinceEpoch;
+      final now = _now().toUtc().millisecondsSinceEpoch;
       await _repository.addChunk(
         CaptureChunk(
           sessionId: sessionId,
@@ -813,7 +983,7 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
         limitBytes: _runtimeSettings.cacheLimitGb * 1024 * 1024 * 1024,
       );
       cacheBytes = result.finalBytes;
-      final now = DateTime.now().toUtc().millisecondsSinceEpoch;
+      final now = _now().toUtc().millisecondsSinceEpoch;
       final canNotify =
           _lastRotationNoticeAtMs == null ||
           now - _lastRotationNoticeAtMs! >= 60000;
@@ -861,10 +1031,27 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
   }
 
   Future<void> _refreshStatistics() async {
-    final now = DateTime.now();
-    final end = DateTime(now.year, now.month, now.day + 1);
+    final now = _now();
+    final end = statisticsDays == 1
+        ? now
+        : DateTime(now.year, now.month, now.day + 1);
     final start = end.subtract(Duration(days: statisticsDays));
-    final loadedStart = end.subtract(Duration(days: statisticsDays * 2));
+    var loadedStart = start.subtract(end.difference(start));
+    final referenceDay = end.subtract(const Duration(milliseconds: 1));
+    final recentStart = DateTime(
+      referenceDay.year,
+      referenceDay.month,
+      referenceDay.day - 13,
+    );
+    final weekStart = DateTime(
+      referenceDay.year,
+      referenceDay.month,
+      referenceDay.day - (referenceDay.weekday - DateTime.monday),
+    );
+    final lastWeekStart = weekStart.subtract(const Duration(days: 7));
+    for (final candidate in <DateTime>[recentStart, lastWeekStart]) {
+      if (candidate.isBefore(loadedStart)) loadedStart = candidate;
+    }
     final cards = await _repository.listCardsBetween(
       loadedStart.toUtc().millisecondsSinceEpoch,
       end.toUtc().millisecondsSinceEpoch,
@@ -1017,6 +1204,8 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
         AppThemeMode.dark => ThemeMode.dark,
       },
       logLevel: _runtimeSettings.logLevel,
+      autoStartRecording: _runtimeSettings.autoStartRecording,
+      launchAtLogin: _runtimeSettings.launchAtLogin,
     );
   }
 
@@ -1083,6 +1272,8 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
 
   Future<void> _persistSettingsDraft(SettingsDraft draft, int revision) async {
     final apiKey = draft.apiKey.trim();
+    final previousLaunchAtLogin = _runtimeSettings.launchAtLogin;
+    final launchAtLoginChanged = draft.launchAtLogin != previousLaunchAtLogin;
     final runtime = AppSettings(
       apiUrl: draft.apiUrl,
       apiModel: draft.model,
@@ -1097,24 +1288,82 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
           : draft.captureIntervalSeconds,
       chunkDurationSeconds: _runtimeSettings.chunkDurationSeconds,
       logLevel: draft.logLevel,
+      autoStartRecording: draft.autoStartRecording,
+      launchAtLogin: draft.launchAtLogin,
     );
-    await Directory(runtime.captureDirectory).create(recursive: true);
-    _runtimeSettings = await _settingsService.save(
-      runtime,
-      plaintextApiKey: draft.apiKeyChanged && apiKey.isNotEmpty ? apiKey : null,
-    );
-    await _dataDirectoryService?.scheduleChange(
-      currentUserDataDirectory: _activeUserDataDirectory,
-      nextUserDataDirectory: _runtimeSettings.userDataDirectory,
-    );
+    var launchAtLoginApplied = false;
+    try {
+      if (launchAtLoginChanged) {
+        await _nativeService.setLaunchAtLogin(draft.launchAtLogin);
+        launchAtLoginApplied = true;
+      }
+      await Directory(runtime.captureDirectory).create(recursive: true);
+      _runtimeSettings = await _settingsService.save(
+        runtime,
+        plaintextApiKey: draft.apiKeyChanged && apiKey.isNotEmpty
+            ? apiKey
+            : null,
+      );
+    } on Object catch (error) {
+      Object? rollbackFailure;
+      if (launchAtLoginApplied) {
+        try {
+          await _nativeService.setLaunchAtLogin(previousLaunchAtLogin);
+        } on Object catch (rollbackError) {
+          rollbackFailure = rollbackError;
+          try {
+            final actualLaunchAtLogin = await _nativeService
+                .queryLaunchAtLogin();
+            _runtimeSettings = _runtimeSettings.copyWith(
+              launchAtLogin: actualLaunchAtLogin,
+            );
+            if (revision == _latestSettingsSaveRevision) {
+              _syncSettingsView();
+            }
+          } on Object catch (queryError) {
+            rollbackFailure = StateError(
+              '$rollbackError；重新查询启动项失败：$queryError',
+            );
+          }
+        }
+      }
+      if (rollbackFailure != null) {
+        throw StateError('设置保存失败：$error；启动项回滚失败：$rollbackFailure');
+      }
+      rethrow;
+    }
+    final postCommitFailures = <String>[];
+    try {
+      await _dataDirectoryService?.scheduleChange(
+        currentUserDataDirectory: _activeUserDataDirectory,
+        nextUserDataDirectory: _runtimeSettings.userDataDirectory,
+      );
+    } on Object catch (error) {
+      postCommitFailures.add('目录迁移调度失败：$error');
+    }
     _hasApiKey = _runtimeSettings.apiKeyConfigured;
     if (revision == _latestSettingsSaveRevision) {
-      await _applyLogLevel(_runtimeSettings.logLevel);
+      try {
+        await _applyLogLevel(_runtimeSettings.logLevel);
+      } on Object catch (error) {
+        postCommitFailures.add('日志级别应用失败：$error');
+      }
       _syncSettingsView();
     }
     if (_hasApiKey) _analysisCoordinator.schedule();
-    await _rotateCache(announceBlocked: true);
-    await _refreshDerivedData();
+    try {
+      await _rotateCache(announceBlocked: true);
+    } on Object catch (error) {
+      postCommitFailures.add('缓存轮转失败：$error');
+    }
+    try {
+      await _refreshDerivedData();
+    } on Object catch (error) {
+      postCommitFailures.add('设置后刷新失败：$error');
+    }
+    if (postCommitFailures.isNotEmpty) {
+      _setMessage(postCommitFailures.join('；'));
+    }
   }
 
   static AppThemeMode _preference(ThemeMode mode) => switch (mode) {
@@ -1186,6 +1435,15 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
     unawaited(_nativeSubscription?.cancel());
     super.dispose();
   }
+}
+
+final class _NativeStopWait {
+  _NativeStopWait({required this.sessionId, required this.generation});
+
+  final String sessionId;
+  final int generation;
+  final Completer<void> completion = Completer<void>();
+  Object? failure;
 }
 
 bool _sameWindowsPath(String left, String right) =>

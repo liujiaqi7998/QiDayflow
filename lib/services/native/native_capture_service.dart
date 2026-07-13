@@ -34,7 +34,7 @@ final class NativeCaptureConfiguration {
   const NativeCaptureConfiguration({
     required this.outputDirectory,
     required this.sessionId,
-    this.captureIntervalSeconds = 1,
+    this.captureIntervalSeconds = defaultCaptureIntervalSeconds,
     this.chunkDurationSeconds = captureChunkDurationSeconds,
     this.maxWidth = captureVideoWidth,
     this.maxHeight = captureVideoHeight,
@@ -79,9 +79,10 @@ sealed class NativeCaptureEvent {
         status: _parseStatus(
           _requiredString(map, const <String>['state', 'status']),
         ),
-        sessionId: _optionalString(
-          _value(map, const <String>['sessionId', 'session_id']),
-        ),
+        sessionId: _requiredString(map, const <String>[
+          'sessionId',
+          'session_id',
+        ]),
         reason: _optionalString(map['reason']),
         idleSeconds: _optionalInt(map['idleSeconds']),
       ),
@@ -91,9 +92,10 @@ sealed class NativeCaptureEvent {
         code: _requiredString(map, const <String>['code']),
         message: _requiredString(map, const <String>['message']),
         recoverable: map['recoverable'] == true || map['fatal'] == false,
-        sessionId: _optionalString(
-          _value(map, const <String>['sessionId', 'session_id']),
-        ),
+        sessionId: _requiredString(map, const <String>[
+          'sessionId',
+          'session_id',
+        ]),
       ),
       'idle' => NativeIdleEvent(
         idleSeconds:
@@ -117,13 +119,13 @@ sealed class NativeCaptureEvent {
 final class NativeCaptureStateEvent extends NativeCaptureEvent {
   const NativeCaptureStateEvent({
     required this.status,
-    this.sessionId,
+    required this.sessionId,
     this.reason,
     this.idleSeconds,
   });
 
   final NativeCaptureStatus status;
-  final String? sessionId;
+  final String sessionId;
   final String? reason;
   final int? idleSeconds;
 }
@@ -329,9 +331,10 @@ final class NativeChunkCompletedEvent extends NativeCaptureEvent {
       _value(map, const <String>['frameCount']) ?? counts['capturedFrames'],
       field: 'frameCount',
     );
-    final maximumFrameCount =
-        (durationMs + captureIntervalSeconds * 1000 - 1) ~/
-        (captureIntervalSeconds * 1000);
+    final maximumFrameCount = calculateMaximumChunkFrameCount(
+      durationMs: durationMs,
+      captureIntervalSeconds: captureIntervalSeconds,
+    );
     if (frameCount > maximumFrameCount) {
       throw const FormatException('原生切片帧数超出实际时长允许的上限');
     }
@@ -409,13 +412,13 @@ final class NativeCaptureErrorEvent extends NativeCaptureEvent {
     required this.code,
     required this.message,
     required this.recoverable,
-    this.sessionId,
+    required this.sessionId,
   });
 
   final String code;
   final String message;
   final bool recoverable;
-  final String? sessionId;
+  final String sessionId;
 }
 
 final class NativeQuitRequestedEvent extends NativeCaptureEvent {
@@ -491,6 +494,19 @@ class NativeCaptureService {
   }
 
   Future<void> closeLogging() => _methods.invokeMethod<void>('closeLogging');
+
+  Future<bool> queryLaunchAtLogin() async {
+    final value = await _methods.invokeMethod<Object?>('queryLaunchAtLogin');
+    if (value is! bool) {
+      throw const FormatException('queryLaunchAtLogin 必须返回布尔值');
+    }
+    return value;
+  }
+
+  Future<void> setLaunchAtLogin(bool enabled) => _methods.invokeMethod<void>(
+    'setLaunchAtLogin',
+    <String, Object>{'enabled': enabled},
+  );
 
   Future<void> updateTrayCaptureState(NativeTrayCaptureState state) =>
       _methods.invokeMethod<void>('updateTrayCaptureState', <String, Object>{

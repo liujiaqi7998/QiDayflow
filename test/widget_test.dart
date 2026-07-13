@@ -729,6 +729,96 @@ void main() {
     },
   );
 
+  testWidgets('startup switches save immediately and remain independent', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final viewModel = _TestViewModel()..section = AppSection.settings;
+    await tester.pumpWidget(QiDayFlowApp(viewModel: viewModel));
+    await tester.pumpAndSettle();
+
+    final autoStart = find.byKey(
+      const ValueKey('settings-auto-start-recording'),
+    );
+    await tester.ensureVisible(autoStart);
+    await tester.pumpAndSettle();
+    await tester.tap(autoStart);
+    await tester.pumpAndSettle();
+
+    expect(viewModel.savedSettings.last.autoStartRecording, isTrue);
+    expect(viewModel.savedSettings.last.launchAtLogin, isFalse);
+
+    final launchAtLogin = find.byKey(
+      const ValueKey('settings-launch-at-login'),
+    );
+    await tester.tap(launchAtLogin);
+    await tester.pumpAndSettle();
+
+    expect(viewModel.savedSettings.last.autoStartRecording, isTrue);
+    expect(viewModel.savedSettings.last.launchAtLogin, isTrue);
+  });
+
+  testWidgets('failed startup setting save reverts the optimistic switch', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final viewModel = _TestViewModel()
+      ..section = AppSection.settings
+      ..settingsSaveFailure = StateError('registry denied');
+    await tester.pumpWidget(QiDayFlowApp(viewModel: viewModel));
+    await tester.pumpAndSettle();
+
+    final launchAtLogin = find.byKey(
+      const ValueKey('settings-launch-at-login'),
+    );
+    await tester.ensureVisible(launchAtLogin);
+    await tester.pumpAndSettle();
+    await tester.tap(launchAtLogin);
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('设置保存失败'), findsOneWidget);
+    expect(tester.widget<SwitchListTile>(launchAtLogin).value, isFalse);
+  });
+
+  testWidgets('an older failed startup save cannot roll back a newer choice', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final firstSaveGate = Completer<void>();
+    final viewModel = _TestViewModel()
+      ..section = AppSection.settings
+      ..firstSettingsSaveGate = firstSaveGate
+      ..failFirstSettingsSave = true;
+    await tester.pumpWidget(QiDayFlowApp(viewModel: viewModel));
+    await tester.pumpAndSettle();
+
+    final autoStart = find.byKey(
+      const ValueKey('settings-auto-start-recording'),
+    );
+    final launchAtLogin = find.byKey(
+      const ValueKey('settings-launch-at-login'),
+    );
+    await tester.ensureVisible(autoStart);
+    await tester.pumpAndSettle();
+    await tester.tap(autoStart);
+    await tester.pump();
+    await tester.ensureVisible(launchAtLogin);
+    await tester.pumpAndSettle();
+    await tester.tap(launchAtLogin);
+    await tester.pump();
+    expect(viewModel.savedSettings, hasLength(2));
+
+    firstSaveGate.complete();
+    await tester.pumpAndSettle();
+
+    expect(tester.widget<SwitchListTile>(autoStart).value, isTrue);
+    expect(tester.widget<SwitchListTile>(launchAtLogin).value, isTrue);
+    expect(find.textContaining('设置保存失败'), findsNothing);
+  });
+
   testWidgets(
     'timeline search filters content and keeps the query across dates',
     (WidgetTester tester) async {
@@ -1632,6 +1722,9 @@ final class _TestViewModel extends ChangeNotifier
   final List<String> revealedExecutables = <String>[];
   final List<String> openedUserDataDirectories = <String>[];
   Object? openUserDataDirectoryError;
+  Object? settingsSaveFailure;
+  Completer<void>? firstSettingsSaveGate;
+  bool failFirstSettingsSave = false;
   final List<String> iconRequests = <String>[];
   int analysisQueueRefreshCalls = 0;
   int retryFailedCalls = 0;
@@ -1778,6 +1871,12 @@ final class _TestViewModel extends ChangeNotifier
   @override
   Future<void> saveSettings(SettingsDraft draft) async {
     savedSettings.add(draft);
+    if (savedSettings.length == 1 && firstSettingsSaveGate != null) {
+      await firstSettingsSaveGate!.future;
+      if (failFirstSettingsSave) throw StateError('first save failed');
+    }
+    final failure = settingsSaveFailure;
+    if (failure != null) throw failure;
   }
 
   @override

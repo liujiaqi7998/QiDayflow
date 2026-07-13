@@ -28,11 +28,14 @@ class _SettingsPageState extends State<SettingsPage> {
   late int _captureIntervalSeconds;
   late ThemeMode _themeMode;
   late AppLogLevel _logLevel;
+  late bool _autoStartRecording;
+  late bool _launchAtLogin;
   bool _showApiKey = false;
   bool _loadingApiKey = true;
   bool _apiKeyLoadFailed = false;
   bool _apiKeyDirty = false;
   bool _pendingTextSave = false;
+  int _settingsSaveRevision = 0;
   Timer? _saveDebounce;
 
   @override
@@ -49,6 +52,8 @@ class _SettingsPageState extends State<SettingsPage> {
     _captureIntervalSeconds = value.captureIntervalSeconds;
     _themeMode = value.themeMode;
     _logLevel = value.logLevel;
+    _autoStartRecording = value.autoStartRecording;
+    _launchAtLogin = value.launchAtLogin;
     unawaited(_loadApiKey());
   }
 
@@ -99,6 +104,8 @@ class _SettingsPageState extends State<SettingsPage> {
     themeMode: _themeMode,
     logLevel: _logLevel,
     apiKeyChanged: _apiKeyDirty,
+    autoStartRecording: _autoStartRecording,
+    launchAtLogin: _launchAtLogin,
   );
 
   bool _draftLooksValid() =>
@@ -125,13 +132,22 @@ class _SettingsPageState extends State<SettingsPage> {
   Future<void> _saveNow() async {
     if (!mounted || !(_formKey.currentState?.validate() ?? false)) return;
     final draft = _draft();
+    final revision = ++_settingsSaveRevision;
     try {
       await widget.viewModel.saveSettings(draft);
       if (mounted && draft.apiKeyChanged && draft.apiKey == _apiKey.text) {
         _apiKeyDirty = false;
       }
     } on Object catch (error) {
-      if (!mounted) return;
+      if (!mounted || revision != _settingsSaveRevision) return;
+      setState(() {
+        if (_autoStartRecording == draft.autoStartRecording) {
+          _autoStartRecording = widget.viewModel.settings.autoStartRecording;
+        }
+        if (_launchAtLogin == draft.launchAtLogin) {
+          _launchAtLogin = widget.viewModel.settings.launchAtLogin;
+        }
+      });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('设置保存失败（${error.runtimeType}）'),
@@ -575,6 +591,26 @@ class _SettingsPageState extends State<SettingsPage> {
                           ),
                           onChangeEnd: (_) => _saveImmediately(),
                         ),
+                      SwitchListTile(
+                        key: const ValueKey('settings-auto-start-recording'),
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('启动软件自动开启录制'),
+                        value: _autoStartRecording,
+                        onChanged: (value) {
+                          setState(() => _autoStartRecording = value);
+                          _saveImmediately();
+                        },
+                      ),
+                      SwitchListTile(
+                        key: const ValueKey('settings-launch-at-login'),
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('开机自动后台启动'),
+                        value: _launchAtLogin,
+                        onChanged: (value) {
+                          setState(() => _launchAtLogin = value);
+                          _saveImmediately();
+                        },
+                      ),
                     ],
                   ),
                 ),

@@ -94,3 +94,4 @@ native-capture.log*
 .buildlog/
 .swiftpm/
 migrate_working_dir/
+AppData

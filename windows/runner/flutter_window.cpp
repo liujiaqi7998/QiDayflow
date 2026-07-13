@@ -10,8 +10,9 @@
 #include "native_bridge.h"
 #include "resource.h"
 
-FlutterWindow::FlutterWindow(const flutter::DartProject& project)
-    : project_(project) {}
+FlutterWindow::FlutterWindow(const flutter::DartProject& project,
+                             bool start_in_background)
+    : project_(project), start_in_background_(start_in_background) {}
 
 FlutterWindow::~FlutterWindow() {}
 
@@ -48,8 +49,10 @@ bool FlutterWindow::OnCreate() {
   SetupTrayIcon();
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
-  flutter_controller_->engine()->SetNextFrameCallback([&]() {
-    this->Show();
+  flutter_controller_->engine()->SetNextFrameCallback([this]() {
+    if (!start_in_background_) {
+      Show();
+    }
   });
 
   // Flutter can complete the first frame before the "show window" callback is

@@ -3,6 +3,8 @@ const int captureVideoWidth = 1920;
 const int captureVideoHeight = 1080;
 const int captureFramesPerSecond = 1;
 const int captureChunkDurationSeconds = 60;
+const int defaultCaptureIntervalSeconds = 10;
+const double defaultCaptureFramesPerSecond = 0.1;
 
 final class CaptureContentLayout {
   const CaptureContentLayout({
@@ -55,7 +57,7 @@ CaptureContentLayout calculateCaptureContentLayout({
 }
 
 int calculateRegularChunkFrameCount({
-  int captureIntervalSeconds = 1,
+  int captureIntervalSeconds = defaultCaptureIntervalSeconds,
   int durationSeconds = captureChunkDurationSeconds,
 }) {
   if (!_isSupportedCaptureInterval(captureIntervalSeconds) ||
@@ -64,6 +66,19 @@ int calculateRegularChunkFrameCount({
   }
   return (durationSeconds + captureIntervalSeconds - 1) ~/
       captureIntervalSeconds;
+}
+
+int calculateMaximumChunkFrameCount({
+  required int durationMs,
+  required int captureIntervalSeconds,
+}) {
+  if (durationMs <= 0 || !_isSupportedCaptureInterval(captureIntervalSeconds)) {
+    throw ArgumentError('切片时长必须为正数，截图间隔必须为 1、10、20 或 30 秒');
+  }
+  final intervalMs = captureIntervalSeconds * 1000;
+  // Cadence is anchored before the first chunk opens. Its immediate first
+  // frame means one later cadence frame can arrive within a partial interval.
+  return (durationMs + intervalMs - 1) ~/ intervalMs + 1;
 }
 
 bool hasReachedRegularChunkBoundary({

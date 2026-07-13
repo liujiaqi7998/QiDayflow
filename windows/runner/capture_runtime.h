@@ -6,6 +6,19 @@
 
 namespace qi_day_flow {
 
+constexpr uint32_t kDefaultCaptureIntervalSeconds = 10;
+constexpr double kDefaultCaptureFramesPerSecond =
+    1.0 / kDefaultCaptureIntervalSeconds;
+constexpr uint32_t kDefaultRegularChunkFrameCount = 6;
+
+struct CaptureStopPlan {
+  bool accepted = false;
+  bool request_stop = false;
+  bool join_worker = false;
+};
+
+CaptureStopPlan PlanCaptureStop(bool already_stopped);
+
 struct CaptureLoopDecision {
   bool rebuild_topology = false;
   bool finalize_chunk = false;
@@ -62,7 +75,8 @@ struct CaptureScheduleDecision {
 
 class CaptureSchedule {
  public:
-  explicit CaptureSchedule(uint32_t capture_interval_seconds = 1);
+  explicit CaptureSchedule(
+      uint32_t capture_interval_seconds = kDefaultCaptureIntervalSeconds);
 
   void Configure(uint32_t capture_interval_seconds);
   void Reset(int64_t now_ms);

@@ -322,10 +322,12 @@ class SettingsDraft {
     required this.cacheLimitGb,
     required this.idlePauseEnabled,
     required this.idleTimeoutMinutes,
-    this.captureIntervalSeconds = 1,
+    this.captureIntervalSeconds = 10,
     required this.themeMode,
     this.logLevel = AppLogLevel.info,
     this.apiKeyChanged = true,
+    this.autoStartRecording = false,
+    this.launchAtLogin = false,
   });
 
   final String apiUrl;
@@ -339,6 +341,8 @@ class SettingsDraft {
   final ThemeMode themeMode;
   final AppLogLevel logLevel;
   final bool apiKeyChanged;
+  final bool autoStartRecording;
+  final bool launchAtLogin;
 }
 
 class SettingsViewData {
@@ -352,9 +356,11 @@ class SettingsViewData {
     required this.cacheLimitGb,
     required this.idlePauseEnabled,
     required this.idleTimeoutMinutes,
-    this.captureIntervalSeconds = 1,
+    this.captureIntervalSeconds = 10,
     required this.themeMode,
     this.logLevel = AppLogLevel.info,
+    this.autoStartRecording = false,
+    this.launchAtLogin = false,
   });
 
   final String apiUrl;
@@ -369,6 +375,8 @@ class SettingsViewData {
   final int captureIntervalSeconds;
   final ThemeMode themeMode;
   final AppLogLevel logLevel;
+  final bool autoStartRecording;
+  final bool launchAtLogin;
 }
 
 abstract class QiDayFlowViewModel implements Listenable {

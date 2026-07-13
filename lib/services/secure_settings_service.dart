@@ -36,6 +36,8 @@ final class SecureSettingsService {
               decoded.containsKey('captureFps') ||
               !decoded.containsKey('captureIntervalSeconds') ||
               !decoded.containsKey('logLevel') ||
+              !decoded.containsKey('autoStartRecording') ||
+              !decoded.containsKey('launchAtLogin') ||
               _nonEmpty(decoded['apiModel'] as String?) == null)) {
         await _repository.putSetting(
           _settingsKey,
@@ -60,7 +62,7 @@ final class SecureSettingsService {
       cacheLimitGb: _storedInt(values['cache_limit_gb'], 5),
       idlePauseEnabled: _storedBool(values['idle_pause_enabled'], true),
       idlePauseSeconds: _storedInt(values['idle_pause_seconds'], 600),
-      captureIntervalSeconds: 1,
+      captureIntervalSeconds: 10,
       chunkDurationSeconds: _storedInt(values['chunk_duration_seconds'], 60),
       themeMode: _storedTheme(values['theme_mode']),
       logLevel: _storedLogLevel(values['log_level']),

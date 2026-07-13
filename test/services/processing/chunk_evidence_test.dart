@@ -464,8 +464,8 @@ void main() {
         root: root,
         label: 'too-many-frames',
         schemaVersion: 4,
-        captureIntervalSeconds: 30,
-        frameCount: 3,
+        captureIntervalSeconds: 10,
+        frameCount: 8,
       ),
     ];
 
@@ -509,6 +509,22 @@ void main() {
         durationMs: 31000,
         captureIntervalSeconds: 30,
         frameCount: 2,
+      ),
+      await _writeStrictVideoChunk(
+        root: root,
+        label: 'phase-shifted-9.5s',
+        schemaVersion: 4,
+        endTimeMs: 10500,
+        durationMs: 9500,
+        captureIntervalSeconds: 10,
+        frameCount: 2,
+      ),
+      await _writeStrictVideoChunk(
+        root: root,
+        label: 'exact-boundary-60s',
+        schemaVersion: 4,
+        captureIntervalSeconds: 30,
+        frameCount: 3,
       ),
     ];
     final reader = ChunkEvidenceReader(

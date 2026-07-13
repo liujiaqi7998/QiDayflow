@@ -24,15 +24,30 @@ void main() {
       return value;
     }
 
-    test('defaults to one second and writes only the new field', () {
-      final settings = AppSettings.defaults(
-        captureDirectory: r'D:\Qi Day Flow\captures',
-      );
+    test(
+      'new settings default to ten seconds and write only the new field',
+      () {
+        final settings = AppSettings.defaults(
+          captureDirectory: r'D:\Qi Day Flow\captures',
+        );
 
-      expect(settings.captureIntervalSeconds, 1);
-      expect(settings.toJson()['captureIntervalSeconds'], 1);
-      expect(settings.toJson(), isNot(contains('captureFps')));
-    });
+        expect(settings.captureIntervalSeconds, 10);
+        expect(settings.toJson()['captureIntervalSeconds'], 10);
+        expect(settings.toJson(), isNot(contains('captureFps')));
+
+        final constructed = AppSettings(
+          apiUrl: 'https://api.openai.com/v1',
+          apiModel: 'existing-model',
+          userDataDirectory: r'D:\Qi Day Flow',
+          cacheLimitGb: 5,
+          idlePauseEnabled: true,
+          idlePauseSeconds: 600,
+          chunkDurationSeconds: 60,
+          themeMode: AppThemeMode.system,
+        );
+        expect(constructed.captureIntervalSeconds, 10);
+      },
+    );
 
     test('round-trips each supported capture interval', () {
       for (final interval in const <int>[1, 10, 20, 30]) {
@@ -61,7 +76,7 @@ void main() {
         ).captureIntervalSeconds,
         1,
       );
-      expect(AppSettings.fromJson(settingsJson()).captureIntervalSeconds, 1);
+      expect(AppSettings.fromJson(settingsJson()).captureIntervalSeconds, 10);
     });
 
     test('copyWith validates the exact supported intervals', () {
@@ -148,4 +163,48 @@ void main() {
       );
     },
   );
+
+  group('startup settings', () {
+    Map<String, Object?> settingsJson() => <String, Object?>{
+      'apiUrl': 'https://api.openai.com/v1',
+      'apiModel': 'existing-model',
+      'userDataDirectory': r'D:\Qi Day Flow',
+      'cacheLimitGb': 5,
+      'idlePauseEnabled': true,
+      'idlePauseSeconds': 600,
+      'captureIntervalSeconds': 10,
+      'chunkDurationSeconds': 60,
+      'themeMode': 'system',
+    };
+
+    test('missing startup fields default to false', () {
+      final settings = AppSettings.fromJson(settingsJson());
+
+      expect(settings.autoStartRecording, isFalse);
+      expect(settings.launchAtLogin, isFalse);
+    });
+
+    test('startup fields round-trip and copy independently', () {
+      final settings = AppSettings.fromJson(<String, Object?>{
+        ...settingsJson(),
+        'autoStartRecording': true,
+        'launchAtLogin': true,
+      });
+
+      expect(settings.autoStartRecording, isTrue);
+      expect(settings.launchAtLogin, isTrue);
+      expect(
+        AppSettings.fromJson(settings.toJson()).autoStartRecording,
+        isTrue,
+      );
+      expect(
+        settings.copyWith(autoStartRecording: false).launchAtLogin,
+        isTrue,
+      );
+      expect(
+        settings.copyWith(launchAtLogin: false).autoStartRecording,
+        isTrue,
+      );
+    });
+  });
 }

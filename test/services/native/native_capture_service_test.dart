@@ -7,6 +7,79 @@ import 'package:qi_day_flow/services/native/native_capture_service.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('capture defaults use a ten second interval', () {
+    const configuration = NativeCaptureConfiguration(
+      outputDirectory: r'C:\captures',
+      sessionId: 'session-1',
+    );
+
+    expect(configuration.captureIntervalSeconds, 10);
+    expect(configuration.toMap()['captureIntervalSeconds'], 10);
+    expect(defaultCaptureIntervalSeconds, 10);
+    expect(defaultCaptureFramesPerSecond, 0.1);
+    expect(calculateRegularChunkFrameCount(), 6);
+  });
+
+  test('state and error events require and preserve their session id', () {
+    final state =
+        NativeCaptureEvent.fromMap(<Object?, Object?>{
+              'type': 'state',
+              'status': 'stopped',
+              'sessionId': 'session-1',
+            })
+            as NativeCaptureStateEvent;
+    final error =
+        NativeCaptureEvent.fromMap(<Object?, Object?>{
+              'type': 'error',
+              'code': 'fatal',
+              'message': 'failed',
+              'recoverable': false,
+              'sessionId': 'session-1',
+            })
+            as NativeCaptureErrorEvent;
+
+    expect(state.sessionId, 'session-1');
+    expect(error.sessionId, 'session-1');
+    expect(
+      () => NativeCaptureEvent.fromMap(<Object?, Object?>{
+        'type': 'state',
+        'status': 'stopped',
+      }),
+      throwsFormatException,
+    );
+    expect(
+      () => NativeCaptureEvent.fromMap(<Object?, Object?>{
+        'type': 'error',
+        'code': 'fatal',
+        'message': 'failed',
+        'recoverable': false,
+      }),
+      throwsFormatException,
+    );
+  });
+
+  test('launch at login uses narrow query and set channel contracts', () async {
+    const channel = MethodChannel('qi_day_flow/test/launch-at-login');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final calls = <MethodCall>[];
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      calls.add(call);
+      return call.method == 'queryLaunchAtLogin' ? true : null;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    final service = NativeCaptureService(methodChannel: channel);
+
+    expect(await service.queryLaunchAtLogin(), isTrue);
+    await service.setLaunchAtLogin(false);
+
+    expect(calls, hasLength(2));
+    expect(calls.first.method, 'queryLaunchAtLogin');
+    expect(calls.first.arguments, isNull);
+    expect(calls.last.method, 'setLaunchAtLogin');
+    expect(calls.last.arguments, <String, Object>{'enabled': false});
+  });
+
   test('capture configuration sends an integer capture interval', () {
     const configuration = NativeCaptureConfiguration(
       outputDirectory: r'C:\QiDayFlow\captures',
@@ -155,7 +228,7 @@ void main() {
       _schema4ChunkEvent(startTimeMs: 61000, endTimeMs: 1000),
       _schema4ChunkEvent(durationMs: 59000),
       _schema4ChunkEvent(endTimeMs: 61001, durationMs: 60001),
-      _schema4ChunkEvent(captureIntervalSeconds: 30, frameCount: 3),
+      _schema4ChunkEvent(captureIntervalSeconds: 10, frameCount: 8),
     ]) {
       expect(() => NativeCaptureEvent.fromMap(event), throwsFormatException);
     }
@@ -182,9 +255,26 @@ void main() {
               ),
             )
             as NativeChunkCompletedEvent;
+    final phaseShifted =
+        NativeCaptureEvent.fromMap(
+              _schema4ChunkEvent(
+                endTimeMs: 10500,
+                durationMs: 9500,
+                captureIntervalSeconds: 10,
+                frameCount: 2,
+              ),
+            )
+            as NativeChunkCompletedEvent;
+    final exactBoundary =
+        NativeCaptureEvent.fromMap(
+              _schema4ChunkEvent(captureIntervalSeconds: 30, frameCount: 3),
+            )
+            as NativeChunkCompletedEvent;
 
     expect(twoSecond.frameCount, 1);
     expect(thirtyOneSecond.frameCount, 2);
+    expect(phaseShifted.frameCount, 2);
+    expect(exactBoundary.frameCount, 3);
   });
 
   test('schema 3 native event retains bounded compatible timing', () {

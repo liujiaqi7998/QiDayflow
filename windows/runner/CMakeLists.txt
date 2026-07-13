@@ -21,6 +21,8 @@ add_executable(${BINARY_NAME} WIN32
   "native_bridge.h"
   "native_frame_logger.cpp"
   "native_frame_logger.h"
+  "startup_behavior.cpp"
+  "startup_behavior.h"
   "tray_menu_state.cpp"
   "tray_menu_state.h"
   "utils.cpp"
@@ -54,6 +56,7 @@ target_compile_options(${BINARY_NAME} PRIVATE /FS /utf-8)
 # dependencies here.
 target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app)
 target_link_libraries(${BINARY_NAME} PRIVATE
+  "advapi32.lib"
   "crypt32.lib"
   "d3d11.lib"
   "dwmapi.lib"
@@ -127,6 +130,16 @@ apply_standard_settings(qi_day_flow_tray_menu_state_test)
 target_compile_options(qi_day_flow_tray_menu_state_test PRIVATE /FS /utf-8)
 add_test(NAME qi_day_flow_tray_menu_state_test
   COMMAND qi_day_flow_tray_menu_state_test)
+
+add_executable(qi_day_flow_startup_behavior_test EXCLUDE_FROM_ALL
+  "startup_behavior.cpp"
+  "startup_behavior.h"
+  "startup_behavior_test.cpp"
+)
+apply_standard_settings(qi_day_flow_startup_behavior_test)
+target_compile_options(qi_day_flow_startup_behavior_test PRIVATE /FS /utf-8)
+add_test(NAME qi_day_flow_startup_behavior_test
+  COMMAND qi_day_flow_startup_behavior_test)
 
 # Run the Flutter tool portions of the build. This must not be removed.
 add_dependencies(${BINARY_NAME} flutter_assemble)

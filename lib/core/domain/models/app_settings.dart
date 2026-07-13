@@ -18,10 +18,12 @@ final class AppSettings {
     required this.cacheLimitGb,
     required this.idlePauseEnabled,
     required this.idlePauseSeconds,
-    this.captureIntervalSeconds = 1,
+    this.captureIntervalSeconds = 10,
     required this.chunkDurationSeconds,
     required this.themeMode,
     this.logLevel = AppLogLevel.info,
+    this.autoStartRecording = false,
+    this.launchAtLogin = false,
   }) : apiUrl = requireNonBlank(apiUrl, 'apiUrl'),
        apiModel = requireNonBlank(apiModel, 'apiModel'),
        userDataDirectory = _resolveUserDataDirectory(
@@ -81,6 +83,8 @@ final class AppSettings {
       'chunkDurationSeconds',
       'themeMode',
       'logLevel',
+      'autoStartRecording',
+      'launchAtLogin',
     };
     final json = strictJsonObject(value, 'settings', allowedKeys: keys);
     return AppSettings(
@@ -102,6 +106,12 @@ final class AppSettings {
       logLevel: json.containsKey('logLevel')
           ? AppLogLevel.values.byName(jsonString(json, 'logLevel'))
           : AppLogLevel.info,
+      autoStartRecording: json.containsKey('autoStartRecording')
+          ? jsonBool(json, 'autoStartRecording')
+          : false,
+      launchAtLogin: json.containsKey('launchAtLogin')
+          ? jsonBool(json, 'launchAtLogin')
+          : false,
     );
   }
 
@@ -113,7 +123,7 @@ final class AppSettings {
         cacheLimitGb: 5,
         idlePauseEnabled: true,
         idlePauseSeconds: 600,
-        captureIntervalSeconds: 1,
+        captureIntervalSeconds: 10,
         chunkDurationSeconds: 60,
         themeMode: AppThemeMode.system,
         logLevel: AppLogLevel.info,
@@ -130,6 +140,8 @@ final class AppSettings {
   final int chunkDurationSeconds;
   final AppThemeMode themeMode;
   final AppLogLevel logLevel;
+  final bool autoStartRecording;
+  final bool launchAtLogin;
 
   bool get apiKeyConfigured => apiKeyCiphertext?.isNotEmpty ?? false;
 
@@ -147,6 +159,8 @@ final class AppSettings {
     'chunkDurationSeconds': chunkDurationSeconds,
     'themeMode': themeMode.name,
     'logLevel': logLevel.name,
+    'autoStartRecording': autoStartRecording,
+    'launchAtLogin': launchAtLogin,
   };
 
   AppSettings copyWith({
@@ -163,6 +177,8 @@ final class AppSettings {
     int? chunkDurationSeconds,
     AppThemeMode? themeMode,
     AppLogLevel? logLevel,
+    bool? autoStartRecording,
+    bool? launchAtLogin,
   }) => AppSettings(
     apiUrl: apiUrl ?? this.apiUrl,
     apiModel: apiModel ?? this.apiModel,
@@ -182,6 +198,8 @@ final class AppSettings {
     chunkDurationSeconds: chunkDurationSeconds ?? this.chunkDurationSeconds,
     themeMode: themeMode ?? this.themeMode,
     logLevel: logLevel ?? this.logLevel,
+    autoStartRecording: autoStartRecording ?? this.autoStartRecording,
+    launchAtLogin: launchAtLogin ?? this.launchAtLogin,
   );
 }
 
@@ -191,8 +209,9 @@ int _captureIntervalSecondsFromJson(Map<String, Object?> json) {
   }
   if (json.containsKey('captureFps')) {
     jsonInt(json, 'captureFps');
+    return 1;
   }
-  return 1;
+  return 10;
 }
 
 String _apiModelFromJson(Map<String, Object?> json) {

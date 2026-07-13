@@ -42,11 +42,30 @@ void main() {
       final nativeCalls = <MethodCall>[];
       Completer<Object?>? protectTextGate;
       Completer<void>? startCaptureSignal;
+      String? lastStartedSessionId;
       messenger.setMockMethodCallHandler(methodChannel, (call) async {
         nativeCalls.add(call);
         if (call.method == 'startCapture') {
+          lastStartedSessionId =
+              (call.arguments as Map<Object?, Object?>)['sessionId'] as String;
           final signal = startCaptureSignal;
           if (signal != null && !signal.isCompleted) signal.complete();
+        }
+        if (call.method == 'stopCapture') {
+          unawaited(
+            Future<void>.delayed(Duration.zero, () {
+              messenger.handlePlatformMessage(
+                'qi_day_flow/test/controller-events',
+                const StandardMethodCodec()
+                    .encodeSuccessEnvelope(<String, Object>{
+                      'type': 'state',
+                      'status': 'stopped',
+                      'sessionId': lastStartedSessionId!,
+                    }),
+                (_) {},
+              );
+            }),
+          );
         }
         if (call.method == 'protectSecret') {
           final gate = protectTextGate;
@@ -364,4 +383,114 @@ void main() {
       await controller.stopCapture();
     },
   );
+
+  test('one day statistics use rolling UTC query boundaries', () async {
+    final root = await Directory.systemTemp.createTemp(
+      'qi_day_flow_statistics_clock_',
+    );
+    final database = AppDatabase(
+      path: p.join(root.path, 'dayflow.db'),
+      databaseFactory: databaseFactoryFfi,
+    );
+    final repository = SqliteDayFlowRepository(database);
+    final db = await database.open();
+    final fixedNow = DateTime(2026, 7, 13, 15, 30);
+    final currentStart = fixedNow.subtract(const Duration(hours: 24));
+    final previousStart = fixedNow.subtract(const Duration(hours: 48));
+    final batchId = await db.insert('analysis_batches', <String, Object>{
+      'status': 'completed',
+      'created_at_ms': previousStart.toUtc().millisecondsSinceEpoch,
+      'updated_at_ms': previousStart.toUtc().millisecondsSinceEpoch,
+    });
+    var ordinal = 0;
+    Future<void> addCard(DateTime start, DateTime end) async {
+      await db.insert('timeline_cards', <String, Object>{
+        'batch_id': batchId,
+        'ordinal': ordinal++,
+        'report_date': formatIsoDate(start),
+        'category': '工作',
+        'title': '边界记录',
+        'summary': '',
+        'started_at_ms': start.toUtc().millisecondsSinceEpoch,
+        'ended_at_ms': end.toUtc().millisecondsSinceEpoch,
+        'app_usages_json': '[]',
+        'distractions_json': '[]',
+        'productivity_score': 80,
+        'created_at_ms': start.toUtc().millisecondsSinceEpoch,
+        'updated_at_ms': start.toUtc().millisecondsSinceEpoch,
+      });
+    }
+
+    await addCard(
+      previousStart.subtract(const Duration(minutes: 10)),
+      previousStart,
+    );
+    await addCard(
+      previousStart,
+      previousStart.add(const Duration(minutes: 10)),
+    );
+    await addCard(
+      currentStart.subtract(const Duration(minutes: 10)),
+      currentStart,
+    );
+    await addCard(currentStart, currentStart.add(const Duration(minutes: 20)));
+    await addCard(fixedNow.subtract(const Duration(minutes: 15)), fixedNow);
+    await addCard(fixedNow, fixedNow.add(const Duration(minutes: 10)));
+    final tenDaysAgo = fixedNow.subtract(const Duration(days: 10));
+    await addCard(tenDaysAgo, tenDaysAgo.add(const Duration(minutes: 30)));
+    final fiveDaysAgo = fixedNow.subtract(const Duration(days: 5));
+    await addCard(fiveDaysAgo, fiveDaysAgo.add(const Duration(minutes: 25)));
+
+    const methods = MethodChannel('qi_day_flow/test/statistics-clock-methods');
+    const events = EventChannel('qi_day_flow/test/statistics-clock-events');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(methods, (_) async => null);
+    messenger.setMockMethodCallHandler(
+      const MethodChannel('qi_day_flow/test/statistics-clock-events'),
+      (_) async => null,
+    );
+    final native = NativeCaptureService(
+      methodChannel: methods,
+      eventChannel: events,
+    );
+    final controller = AppController(
+      database: database,
+      repository: repository,
+      nativeService: native,
+      settingsService: SecureSettingsService(
+        repository: repository,
+        platform: native,
+        defaultUserDataDirectory: root.path,
+      ),
+      activeUserDataDirectory: root.path,
+      now: () => fixedNow,
+    );
+    addTearDown(() async {
+      controller.dispose();
+      await database.close();
+      messenger.setMockMethodCallHandler(methods, null);
+      messenger.setMockMethodCallHandler(
+        const MethodChannel('qi_day_flow/test/statistics-clock-events'),
+        null,
+      );
+      await root.delete(recursive: true);
+    });
+
+    await controller.initialize();
+    await controller.setStatisticsDays(1);
+
+    expect(controller.statisticsDays, 1);
+    expect(controller.statistics.totalMinutes, 35);
+    expect(controller.statistics.totalDurationComparison.previous, 20);
+    expect(controller.statistics.lastWeek.totalMinutes, 75);
+    expect(
+      controller.statistics.recentDailyCategoryMinutes[DateTime(
+        tenDaysAgo.year,
+        tenDaysAgo.month,
+        tenDaysAgo.day,
+      )]?['工作'],
+      30,
+    );
+  });
 }

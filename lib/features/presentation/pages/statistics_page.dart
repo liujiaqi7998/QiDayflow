@@ -102,7 +102,9 @@ class _StatisticsHeader extends StatelessWidget {
         Text('统计概览', style: Theme.of(context).textTheme.headlineSmall),
         const SizedBox(height: 4),
         Text(
-          '近 ${viewModel.statisticsDays} 天 · 截至今日，按本地日期和实际记录时长统计',
+          viewModel.statisticsDays == 1
+              ? '最近 24 小时 · 按滚动时间范围和实际记录时长统计'
+              : '近 ${viewModel.statisticsDays} 天 · 截至今日，按本地日期和实际记录时长统计',
           style: Theme.of(context).textTheme.bodySmall?.copyWith(
             color: Theme.of(context).colorScheme.onSurfaceVariant,
           ),
@@ -111,6 +113,7 @@ class _StatisticsHeader extends StatelessWidget {
     );
     final range = SegmentedButton<int>(
       segments: const [
+        ButtonSegment(value: 1, label: Text('近 1 天')),
         ButtonSegment(value: 7, label: Text('近 7 天')),
         ButtonSegment(value: 30, label: Text('近 30 天')),
       ],

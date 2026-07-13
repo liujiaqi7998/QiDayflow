@@ -18,7 +18,7 @@ class NativeBridge;
 class FlutterWindow : public Win32Window {
  public:
   // Creates a new FlutterWindow hosting a Flutter view running |project|.
-  explicit FlutterWindow(const flutter::DartProject& project);
+  FlutterWindow(const flutter::DartProject& project, bool start_in_background);
   virtual ~FlutterWindow();
 
  protected:
@@ -48,6 +48,7 @@ class FlutterWindow : public Win32Window {
 
   // The project to run.
   flutter::DartProject project_;
+  bool start_in_background_ = false;
 
   // The Flutter instance hosted by this window.
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;

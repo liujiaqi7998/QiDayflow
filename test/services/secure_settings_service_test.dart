@@ -22,6 +22,7 @@ void main() {
       final settings = await service.load();
 
       expect(settings.userDataDirectory, r'E:\Existing QiDayFlow');
+      expect(settings.captureIntervalSeconds, 10);
       final migrated = jsonDecode(repository.values['app_settings']!) as Map;
       expect(migrated['userDataDirectory'], r'E:\Existing QiDayFlow');
       expect(migrated, isNot(contains('captureDirectory')));

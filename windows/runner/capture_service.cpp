@@ -1340,18 +1340,24 @@ class CaptureService::Impl {
   }
 
   bool Stop(std::string* error) {
-    if (state_.load() == CaptureState::kStopped) {
+    const CaptureStopPlan plan =
+        PlanCaptureStop(state_.load() == CaptureState::kStopped);
+    if (!plan.accepted) {
       if (error != nullptr) {
         *error = "Capture is already stopped";
       }
       return false;
     }
-    stop_requested_.store(true);
-    EmitState(CaptureState::kStopping, "stopRequested");
-    wake_condition_.notify_all();
-    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-    if (worker_.joinable()) {
-      worker_.join();
+    if (plan.join_worker) {
+      if (error != nullptr) {
+        *error = "Capture stop plan cannot join the worker synchronously";
+      }
+      return false;
+    }
+    if (plan.request_stop) {
+      stop_requested_.store(true);
+      EmitState(CaptureState::kStopping, "stopRequested");
+      wake_condition_.notify_all();
     }
     return true;
   }
@@ -1609,20 +1615,20 @@ class CaptureService::Impl {
     }
 
     FinalizeCurrentChunk(SteadyClock::now());
-    ResetCaptureTopology();
-    wic_factory_.Reset();
     FinishWorker(com_initialized, media_foundation_started);
   }
 
   void FinishWorker(bool com_initialized, bool media_foundation_started) {
+    ResetCaptureTopology();
+    wic_factory_.Reset();
     if (media_foundation_started) {
       static_cast<void>(MFShutdown());
     }
-    state_.store(CaptureState::kStopped);
-    EmitState(CaptureState::kStopped, "stopped");
     if (com_initialized) {
       CoUninitialize();
     }
+    state_.store(CaptureState::kStopped);
+    EmitState(CaptureState::kStopped, "stopped");
   }
 
   void WaitFor(std::chrono::milliseconds duration) {

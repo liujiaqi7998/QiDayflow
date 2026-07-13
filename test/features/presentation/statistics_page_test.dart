@@ -10,6 +10,33 @@ import 'package:qi_day_flow/features/presentation/app_view_model.dart';
 import 'package:qi_day_flow/features/presentation/pages/statistics_page.dart';
 
 void main() {
+  testWidgets('one day range is labeled as a rolling 24 hour period', (
+    tester,
+  ) async {
+    final viewModel = _StatisticsViewModel(
+      statistics: _statistics(),
+      statisticsDays: 1,
+    );
+
+    await tester.pumpWidget(_host(viewModel));
+
+    expect(find.text('近 1 天'), findsOneWidget);
+    expect(find.textContaining('最近 24 小时'), findsOneWidget);
+    expect(find.textContaining('按本地日期'), findsNothing);
+  });
+
+  testWidgets('calendar day ranges retain their local date description', (
+    tester,
+  ) async {
+    final viewModel = _StatisticsViewModel(statistics: _statistics());
+
+    await tester.pumpWidget(_host(viewModel));
+
+    expect(find.text('近 7 天'), findsOneWidget);
+    expect(find.text('近 30 天'), findsOneWidget);
+    expect(find.textContaining('按本地日期'), findsOneWidget);
+  });
+
   testWidgets('daily chart uses hover details instead of a permanent legend', (
     tester,
   ) async {
@@ -299,7 +326,11 @@ final Uint8List _onePixelPng = base64Decode(
 
 final class _StatisticsViewModel extends ChangeNotifier
     implements QiDayFlowViewModel {
-  _StatisticsViewModel({required this.statistics, this.iconResults = const {}});
+  _StatisticsViewModel({
+    required this.statistics,
+    this.iconResults = const {},
+    this.statisticsDays = 7,
+  });
 
   @override
   final StatisticsViewData statistics;
@@ -308,7 +339,7 @@ final class _StatisticsViewModel extends ChangeNotifier
   final List<String> iconRequests = [];
 
   @override
-  int statisticsDays = 7;
+  int statisticsDays;
 
   @override
   Future<Uint8List?> loadApplicationIcon(String executablePath) {
