@@ -25,6 +25,7 @@ class _SettingsPageState extends State<SettingsPage> {
   late int _cacheLimitGb;
   late bool _idlePauseEnabled;
   late int _idleTimeoutMinutes;
+  late int _captureIntervalSeconds;
   late ThemeMode _themeMode;
   late AppLogLevel _logLevel;
   bool _showApiKey = false;
@@ -45,6 +46,7 @@ class _SettingsPageState extends State<SettingsPage> {
     _cacheLimitGb = value.cacheLimitGb;
     _idlePauseEnabled = value.idlePauseEnabled;
     _idleTimeoutMinutes = value.idleTimeoutMinutes;
+    _captureIntervalSeconds = value.captureIntervalSeconds;
     _themeMode = value.themeMode;
     _logLevel = value.logLevel;
     unawaited(_loadApiKey());
@@ -91,6 +93,9 @@ class _SettingsPageState extends State<SettingsPage> {
     cacheLimitGb: _cacheLimitGb,
     idlePauseEnabled: _idlePauseEnabled,
     idleTimeoutMinutes: _idleTimeoutMinutes,
+    captureIntervalSeconds: widget.viewModel.recordingStatus.isActive
+        ? widget.viewModel.settings.captureIntervalSeconds
+        : _captureIntervalSeconds,
     themeMode: _themeMode,
     logLevel: _logLevel,
     apiKeyChanged: _apiKeyDirty,
@@ -190,6 +195,19 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
+  Future<void> _openUserDataDirectory() async {
+    try {
+      await widget.viewModel.openUserDataDirectory(
+        _userDataDirectory.text.trim(),
+      );
+    } on Object catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('打开用户数据目录失败：$error'), showCloseIcon: true),
+      );
+    }
+  }
+
   Future<void> _confirmClearCachedVideos() async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -258,6 +276,7 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   Widget build(BuildContext context) {
     final vm = widget.viewModel;
+    final captureIntervalLocked = vm.recordingStatus.isActive;
     return Form(
       key: _formKey,
       child: Column(
@@ -404,6 +423,17 @@ class _SettingsPageState extends State<SettingsPage> {
                               icon: const Icon(Icons.folder_open),
                             ),
                           ),
+                          const SizedBox(width: 8),
+                          Tooltip(
+                            message: '在资源管理器中打开用户数据目录',
+                            child: IconButton(
+                              key: const ValueKey(
+                                'settings-open-user-data-directory',
+                              ),
+                              onPressed: _openUserDataDirectory,
+                              icon: const Icon(Icons.open_in_new),
+                            ),
+                          ),
                         ],
                       ),
                       if (vm.settings.dataDirectoryRestartRequired) ...[
@@ -418,6 +448,90 @@ class _SettingsPageState extends State<SettingsPage> {
                           ),
                         ),
                       ],
+                      const SizedBox(height: 16),
+                      Semantics(
+                        key: const ValueKey('settings-capture-interval'),
+                        container: true,
+                        explicitChildNodes: true,
+                        label: captureIntervalLocked
+                            ? '截图间隔，当前 $_captureIntervalSeconds 秒。录制正在进行，设置已锁定'
+                            : '截图间隔，当前 $_captureIntervalSeconds 秒',
+                        child: LayoutBuilder(
+                          builder: (context, constraints) {
+                            if (constraints.maxWidth < 420) {
+                              return DropdownButtonFormField<int>(
+                                initialValue: _captureIntervalSeconds,
+                                decoration: const InputDecoration(
+                                  labelText: '截图间隔',
+                                ),
+                                items: AppSettings
+                                    .supportedCaptureIntervalSeconds
+                                    .map(
+                                      (interval) => DropdownMenuItem<int>(
+                                        value: interval,
+                                        child: Text('$interval 秒'),
+                                      ),
+                                    )
+                                    .toList(growable: false),
+                                onChanged: captureIntervalLocked
+                                    ? null
+                                    : (value) {
+                                        if (value == null ||
+                                            value == _captureIntervalSeconds) {
+                                          return;
+                                        }
+                                        setState(
+                                          () => _captureIntervalSeconds = value,
+                                        );
+                                        _saveImmediately();
+                                      },
+                              );
+                            }
+                            return Align(
+                              alignment: Alignment.centerLeft,
+                              child: SegmentedButton<int>(
+                                segments: AppSettings
+                                    .supportedCaptureIntervalSeconds
+                                    .map(
+                                      (interval) => ButtonSegment<int>(
+                                        value: interval,
+                                        label: Text('$interval 秒'),
+                                      ),
+                                    )
+                                    .toList(growable: false),
+                                selected: <int>{_captureIntervalSeconds},
+                                onSelectionChanged: captureIntervalLocked
+                                    ? null
+                                    : (values) {
+                                        final value = values.single;
+                                        if (value == _captureIntervalSeconds) {
+                                          return;
+                                        }
+                                        setState(
+                                          () => _captureIntervalSeconds = value,
+                                        );
+                                        _saveImmediately();
+                                      },
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          captureIntervalLocked
+                              ? '录制期间截图间隔已锁定，停止录制后可更改。'
+                              : '频率越低，本地视频体积、CPU 和 AI 候选图片越少，但短暂活动可能不被图像捕获。',
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      if (!captureIntervalLocked)
+                        const Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text('更改将在下次开始录制时生效。'),
+                        ),
                       const SizedBox(height: 16),
                       _SliderSetting(
                         title: '缓存上限',

@@ -55,29 +55,29 @@ CaptureContentLayout calculateCaptureContentLayout({
 }
 
 int calculateRegularChunkFrameCount({
-  num fps = captureFramesPerSecond,
+  int captureIntervalSeconds = 1,
   int durationSeconds = captureChunkDurationSeconds,
 }) {
-  if (!fps.isFinite || fps <= 0 || durationSeconds <= 0) {
-    throw ArgumentError('FPS 和切片时长必须为正数');
+  if (!_isSupportedCaptureInterval(captureIntervalSeconds) ||
+      durationSeconds <= 0) {
+    throw ArgumentError('截图间隔必须为 1、10、20 或 30 秒，切片时长必须为正数');
   }
-  return (fps * durationSeconds).round();
+  return (durationSeconds + captureIntervalSeconds - 1) ~/
+      captureIntervalSeconds;
 }
 
-bool hasReachedRegularChunkBoundary(
-  int frameCount, {
-  num fps = captureFramesPerSecond,
+bool hasReachedRegularChunkBoundary({
+  required int elapsedMilliseconds,
   int durationSeconds = captureChunkDurationSeconds,
 }) {
-  if (frameCount < 0) {
-    throw ArgumentError.value(frameCount, 'frameCount', '不能为负数');
+  if (elapsedMilliseconds < 0 || durationSeconds <= 0) {
+    throw ArgumentError('单调时钟时长不能为负数，切片时长必须为正数');
   }
-  return frameCount >=
-      calculateRegularChunkFrameCount(
-        fps: fps,
-        durationSeconds: durationSeconds,
-      );
+  return elapsedMilliseconds >= durationSeconds * 1000;
 }
+
+bool _isSupportedCaptureInterval(int value) =>
+    value == 1 || value == 10 || value == 20 || value == 30;
 
 int _divideRounded(int numerator, int denominator) =>
     (numerator + denominator ~/ 2) ~/ denominator;

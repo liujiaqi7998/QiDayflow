@@ -53,6 +53,7 @@ void main() {
             0x0a,
           ]),
           'revealExecutableInExplorer' => true,
+          'openDirectoryInExplorer' => <String, Object>{'opened': true},
           _ => null,
         };
       });
@@ -224,23 +225,33 @@ void main() {
           cacheLimitGb: controller.settings.cacheLimitGb,
           idlePauseEnabled: controller.settings.idlePauseEnabled,
           idleTimeoutMinutes: controller.settings.idleTimeoutMinutes,
+          captureIntervalSeconds: 20,
           themeMode: controller.settings.themeMode,
         ),
       );
       expect(controller.settings.userDataDirectory, nextUserDataDirectory);
       expect(controller.settings.dataDirectoryRestartRequired, isTrue);
+      expect(controller.settings.captureIntervalSeconds, 20);
 
       expect(
         await controller.loadApplicationIcon(r'C:\Apps\Editor.exe'),
         isNotNull,
       );
       await controller.revealExecutableInExplorer(r'C:\Apps\Editor.exe');
+      await controller.openUserDataDirectory(r'C:\QiDayFlow');
       expect(
         nativeCalls.map((call) => call.method),
         containsAll(<String>[
           'getExecutableIcon',
           'revealExecutableInExplorer',
+          'openDirectoryInExplorer',
         ]),
+      );
+      expect(
+        nativeCalls
+            .singleWhere((call) => call.method == 'openDirectoryInExplorer')
+            .arguments,
+        <String, Object>{'directoryPath': r'C:\QiDayFlow'},
       );
 
       await controller.startCapture();
@@ -256,10 +267,46 @@ void main() {
           p.windows.join(nextUserDataDirectory, 'captures'),
         ),
       );
-      expect(startCall.arguments, containsPair('fps', 1));
+      expect(startCall.arguments, containsPair('captureIntervalSeconds', 20));
+      expect(startCall.arguments, isNot(contains('fps')));
       expect(startCall.arguments, containsPair('chunkDurationSeconds', 60));
       expect(startCall.arguments, containsPair('maxWidth', 1920));
       expect(startCall.arguments, containsPair('maxHeight', 1080));
+      await controller.saveSettings(
+        SettingsDraft(
+          apiUrl: controller.settings.apiUrl,
+          apiKey: '',
+          apiKeyChanged: false,
+          model: controller.settings.model,
+          userDataDirectory: controller.settings.userDataDirectory,
+          cacheLimitGb: controller.settings.cacheLimitGb,
+          idlePauseEnabled: controller.settings.idlePauseEnabled,
+          idleTimeoutMinutes: controller.settings.idleTimeoutMinutes,
+          captureIntervalSeconds: 30,
+          themeMode: controller.settings.themeMode,
+          logLevel: controller.settings.logLevel,
+        ),
+      );
+      expect(controller.recordingStatus, RecordingViewStatus.recording);
+      expect(controller.settings.captureIntervalSeconds, 20);
+      expect(
+        nativeCalls.where((call) => call.method == 'startCapture'),
+        hasLength(1),
+      );
+      expect(
+        nativeCalls.where((call) => call.method == 'stopCapture'),
+        isEmpty,
+      );
+
+      await controller.stopCapture();
+      await controller.startCapture();
+      final nextStartCall = nativeCalls.lastWhere(
+        (call) => call.method == 'startCapture',
+      );
+      expect(
+        nextStartCall.arguments,
+        containsPair('captureIntervalSeconds', 20),
+      );
       await controller.stopCapture();
     },
   );

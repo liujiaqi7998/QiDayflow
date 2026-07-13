@@ -2,6 +2,7 @@
 
 #include "capture_pixel_buffer.h"
 #include "capture_runtime.h"
+#include "frame_similarity.h"
 #include "native_frame_logger.h"
 
 #include <d3d11.h>
@@ -50,10 +51,8 @@ constexpr uint64_t kMaximumSourceFrameBytes = 512ULL * 1024ULL * 1024ULL;
 constexpr uint64_t kMaximumVideoFileBytes = 512ULL * 1024ULL * 1024ULL;
 constexpr uint32_t kCaptureVideoWidth = 1920;
 constexpr uint32_t kCaptureVideoHeight = 1080;
-constexpr double kCaptureFramesPerSecond = 1.0;
 constexpr int32_t kCaptureChunkDurationSeconds = 60;
 constexpr uint32_t kMinimumVideoBitrate = 2500000;
-constexpr uint32_t kMaximumVideoBitrate = 4000000;
 constexpr uint32_t kHardMaximumExtractedFrames = 8;
 constexpr uint32_t kHardMaximumExtractWidth = 1920;
 constexpr uint32_t kHardMaximumExtractHeight = 1080;
@@ -67,15 +66,26 @@ constexpr DWORD kSourceReaderFirstVideoStream =
 constexpr DWORD kSourceReaderMediaSource =
     static_cast<DWORD>(MF_SOURCE_READER_MEDIASOURCE);
 
-uint32_t CalculateRegularChunkFrameCount(double fps,
-                                         int32_t duration_seconds) {
-  return std::max<uint32_t>(
-      1, static_cast<uint32_t>(std::llround(fps * duration_seconds)));
-}
-
 int64_t UnixTimeMillis() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
              std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+
+int64_t SteadyTimeMillis(SteadyClock::time_point value) {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             value.time_since_epoch())
+      .count();
+}
+
+int64_t SteadyElapsedMediaFoundationTicks(SteadyClock::time_point start,
+                                          SteadyClock::time_point end) {
+  using MediaFoundationDuration =
+      std::chrono::duration<int64_t, std::ratio<1, 10'000'000>>;
+  if (end <= start) {
+    return 0;
+  }
+  return std::chrono::duration_cast<MediaFoundationDuration>(end - start)
       .count();
 }
 
@@ -1272,14 +1282,15 @@ class CaptureService::Impl {
       return false;
     }
     if (config.output_root.empty() || config.session_id.empty() ||
-        !std::isfinite(config.fps) ||
-        config.fps != kCaptureFramesPerSecond ||
+        !IsSupportedCaptureIntervalSeconds(
+            config.capture_interval_seconds) ||
         config.chunk_duration_seconds != kCaptureChunkDurationSeconds ||
         config.max_width != kCaptureVideoWidth ||
         config.max_height != kCaptureVideoHeight) {
       if (error != nullptr) {
         *error =
-            "Capture requires 1920x1080, 1 FPS, and 60-second chunks";
+            "Capture requires a 1/10/20/30-second interval, 1920x1080, "
+            "and 60-second chunks";
       }
       return false;
     }
@@ -1287,8 +1298,9 @@ class CaptureService::Impl {
       worker_.join();
     }
     config_ = config;
-    chunk_progress_.Configure(CalculateRegularChunkFrameCount(
-        config_.fps, config_.chunk_duration_seconds));
+    capture_schedule_.Configure(config_.capture_interval_seconds);
+    chunk_progress_.Configure(
+        static_cast<int64_t>(config_.chunk_duration_seconds) * 1000);
     previous_cpu_sample_.reset();
     session_id_ = config.session_id;
     stop_requested_.store(false);
@@ -1403,10 +1415,47 @@ class CaptureService::Impl {
     }
 
     uint32_t retry_attempt = 0;
-    SteadyClock::time_point next_frame_time = SteadyClock::now();
+    capture_schedule_.Reset(SteadyTimeMillis(SteadyClock::now()));
     bool was_paused = false;
-    while (!stop_requested_.load()) {
-      if (output_captures_.empty()) {
+    while (true) {
+      const bool stop_requested = stop_requested_.load();
+      const bool manual_paused = manual_pause_requested_.load();
+      const bool idle_paused =
+          !stop_requested && !manual_paused && config_.idle_pause_enabled &&
+          GetIdleMillisecondsInternal() >=
+              static_cast<uint64_t>(config_.idle_timeout_seconds) * 1000ULL;
+      const SteadyClock::time_point now = SteadyClock::now();
+      const int64_t now_ms = SteadyTimeMillis(now);
+      const int64_t chunk_elapsed_ms =
+          chunk_open_
+              ? std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - chunk_start_steady_)
+                    .count()
+              : 0;
+      const CaptureWorkerAction action = DecideCaptureWorkerAction(
+          stop_requested, manual_paused, idle_paused,
+          chunk_open_ && chunk_progress_.frame_count() > 0, chunk_elapsed_ms,
+          !output_captures_.empty());
+
+      if (action == CaptureWorkerAction::kStop) {
+        break;
+      }
+      if (action == CaptureWorkerAction::kPause) {
+        if (!was_paused) {
+          FinalizeCurrentChunk(now);
+          was_paused = true;
+        }
+        EmitStateIfChanged(manual_paused ? CaptureState::kManualPaused
+                                        : CaptureState::kIdlePaused,
+                           manual_paused ? "manual" : "idle");
+        WaitWhilePaused(std::chrono::milliseconds(250), manual_paused);
+        continue;
+      }
+      if (action == CaptureWorkerAction::kFinalizeChunk) {
+        FinalizeCurrentChunk(now);
+        continue;
+      }
+      if (action == CaptureWorkerAction::kInitializeTopology) {
         result = InitializeCaptureTopology();
         if (FAILED(result)) {
           ++retry_attempt;
@@ -1418,40 +1467,32 @@ class CaptureService::Impl {
           continue;
         }
         retry_attempt = 0;
-        next_frame_time = SteadyClock::now();
-      }
-
-      const bool manual_paused = manual_pause_requested_.load();
-      const bool idle_paused =
-          config_.idle_pause_enabled &&
-          GetIdleMillisecondsInternal() >=
-              static_cast<uint64_t>(config_.idle_timeout_seconds) * 1000ULL;
-      if (manual_paused || idle_paused) {
-        if (!was_paused) {
-          FinalizeCurrentChunk(SteadyClock::now());
-          was_paused = true;
-        }
-        EmitStateIfChanged(manual_paused ? CaptureState::kManualPaused
-                                        : CaptureState::kIdlePaused,
-                           manual_paused ? "manual" : "idle");
-        WaitFor(std::chrono::milliseconds(250));
+        capture_schedule_.Reset(SteadyTimeMillis(SteadyClock::now()));
         continue;
       }
+
       if (was_paused) {
         was_paused = false;
-        next_frame_time = SteadyClock::now();
+        previous_cpu_sample_.reset();
+        capture_schedule_.Reset(now_ms);
       }
       EmitStateIfChanged(CaptureState::kRecording, "active");
 
-      const SteadyClock::time_point now = SteadyClock::now();
-      if (now < next_frame_time) {
-        WaitUntil(next_frame_time);
+      const CaptureScheduleDecision due = capture_schedule_.Poll(now_ms);
+      if (!due.capture_frame && !due.sample_metadata) {
+        WaitFor(std::chrono::milliseconds(std::max<int64_t>(
+            1, capture_schedule_.DelayUntilNextMs(now_ms))));
         continue;
       }
-      const auto interval = std::chrono::duration<double>(1.0 / config_.fps);
-      next_frame_time = now +
-                        std::chrono::duration_cast<SteadyClock::duration>(
-                            interval);
+
+      bool metadata_sampled = false;
+      if (due.sample_metadata && chunk_open_) {
+        CommitWindowRecord(SampleForegroundWindow(now));
+        metadata_sampled = true;
+      }
+      if (!due.capture_frame) {
+        continue;
+      }
 
       bool topology_changed = false;
       result = DetectCaptureTargetChange(&topology_changed);
@@ -1508,9 +1549,26 @@ class CaptureService::Impl {
         WaitFor(std::chrono::milliseconds(250));
         continue;
       }
+      if (stop_requested_.load()) {
+        break;
+      }
+      if (manual_pause_requested_.load()) {
+        continue;
+      }
 
+      const SteadyClock::time_point sample_time = SteadyClock::now();
+      if (chunk_open_) {
+        const int64_t sample_chunk_elapsed_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                sample_time - chunk_start_steady_)
+                .count();
+        if (chunk_progress_.ShouldFinalizeBeforeSample(
+                sample_chunk_elapsed_ms)) {
+          FinalizeCurrentChunk(sample_time);
+        }
+      }
       if (!chunk_open_) {
-        result = StartNewChunk(now);
+        result = StartNewChunk(sample_time);
         if (FAILED(result)) {
           EmitError("videoWriterInitializationFailed",
                     "Unable to initialize the H.264 MP4 writer", result, true);
@@ -1519,14 +1577,18 @@ class CaptureService::Impl {
           continue;
         }
       }
-      const SteadyClock::time_point sample_time = SteadyClock::now();
-      PendingWindowRecord pending_window = SampleForegroundWindow(sample_time);
+      const int64_t sample_offset_ms = std::max<int64_t>(
+          0, std::chrono::duration_cast<std::chrono::milliseconds>(
+                 sample_time - chunk_start_steady_)
+                 .count());
+      const int64_t sample_offset_ticks =
+          SteadyElapsedMediaFoundationTicks(chunk_start_steady_, sample_time);
       const uint64_t frame_index = chunk_progress_.frame_count();
-      result = WriteVideoFrame(*source_frame);
+      result = WriteVideoFrame(*source_frame, sample_offset_ticks);
       if (frame_logger_ != nullptr) {
         frame_logger_->LogFrame(NativeFrameLogEntry{
-            chunk_id_, frame_index, pending_window.record.timestamp_ms,
-            pending_window.record.offset_ms,
+            chunk_id_, frame_index, chunk_start_time_ms_ + sample_offset_ms,
+            sample_offset_ms,
             output_captures_.empty()
                 ? std::string()
                 : output_captures_.front().output().info.id,
@@ -1534,15 +1596,14 @@ class CaptureService::Impl {
       }
       if (FAILED(result)) {
         EmitError("videoFrameWriteFailed",
-                  "Unable to write a frame to the MP4 chunk", result, true);
-        FinalizeCurrentChunk(now);
+                   "Unable to write a frame to the MP4 chunk", result, true);
+        ResetChunkState(true);
       } else {
-        const CaptureLoopDecision decision =
-            chunk_progress_.OnFrameWritten(pending_window.record.offset_ms);
-        CommitWindowRecord(std::move(pending_window));
+        chunk_progress_.OnFrameWritten(sample_offset_ms);
+        capture_schedule_.OnFrameCaptured(SteadyTimeMillis(sample_time));
         TrackCapturedSource(sample_time);
-        if (decision.finalize_chunk) {
-          FinalizeCurrentChunk(sample_time);
+        if (due.sample_metadata && !metadata_sampled) {
+          CommitWindowRecord(SampleForegroundWindow(sample_time));
         }
       }
     }
@@ -1566,18 +1627,22 @@ class CaptureService::Impl {
 
   void WaitFor(std::chrono::milliseconds duration) {
     std::unique_lock<std::mutex> lock(wait_mutex_);
-    wake_condition_.wait_for(lock, duration,
-                             [this]() { return stop_requested_.load(); });
+    wake_condition_.wait_for(lock, duration, [this]() {
+      return ShouldWakeCaptureRetryWait(stop_requested_.load(),
+                                        manual_pause_requested_.load());
+    });
   }
 
   void WaitFor(std::chrono::seconds duration) {
     WaitFor(std::chrono::duration_cast<std::chrono::milliseconds>(duration));
   }
 
-  void WaitUntil(SteadyClock::time_point deadline) {
+  void WaitWhilePaused(std::chrono::milliseconds duration,
+                       bool manual_paused) {
     std::unique_lock<std::mutex> lock(wait_mutex_);
-    wake_condition_.wait_until(lock, deadline, [this]() {
-      return stop_requested_.load() || manual_pause_requested_.load();
+    wake_condition_.wait_for(lock, duration, [this, manual_paused]() {
+      return stop_requested_.load() ||
+             manual_pause_requested_.load() != manual_paused;
     });
   }
 
@@ -1735,9 +1800,11 @@ class CaptureService::Impl {
       return result;
     }
 
-    frame_rate_numerator_ = 1;
-    frame_rate_denominator_ = 1;
-    frame_duration_ticks_ = kMediaFoundationTicksPerSecond;
+    const CaptureVideoTiming timing =
+        VideoTimingForInterval(config_.capture_interval_seconds);
+    frame_rate_numerator_ = timing.frame_rate_numerator;
+    frame_rate_denominator_ = timing.frame_rate_denominator;
+    frame_duration_ticks_ = timing.frame_duration_ticks;
 
     ComPtr<IMFMediaType> output_type;
     result = MFCreateMediaType(output_type.GetAddressOf());
@@ -1748,12 +1815,7 @@ class CaptureService::Impl {
     if (SUCCEEDED(result)) {
       result = output_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
     }
-    const uint64_t estimated_bitrate = static_cast<uint64_t>(std::llround(
-        static_cast<long double>(video_width_) * video_height_ *
-        kCaptureFramesPerSecond * 2.5L));
-    const uint32_t bitrate = static_cast<uint32_t>(
-        std::clamp<uint64_t>(estimated_bitrate, kMinimumVideoBitrate,
-                             kMaximumVideoBitrate));
+    const uint32_t bitrate = kMinimumVideoBitrate;
     if (SUCCEEDED(result)) {
       result = output_type->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
     }
@@ -1827,7 +1889,8 @@ class CaptureService::Impl {
     return result;
   }
 
-  HRESULT WriteVideoFrame(const std::vector<uint8_t>& source_frame) {
+  HRESULT WriteVideoFrame(const std::vector<uint8_t>& source_frame,
+                          int64_t sample_offset_ticks) {
     if (!chunk_open_ || sink_writer_ == nullptr) {
       return E_UNEXPECTED;
     }
@@ -1873,16 +1936,47 @@ class CaptureService::Impl {
     if (SUCCEEDED(result)) {
       result = sample->AddBuffer(buffer.Get());
     }
-    if (SUCCEEDED(result)) {
-      result = sample->SetSampleTime(
-          static_cast<LONGLONG>(chunk_progress_.frame_count()) *
-          frame_duration_ticks_);
+    int64_t normalized_offset_ticks =
+        CalculateMediaSampleTiming(sample_offset_ticks, sample_offset_ticks)
+            .timestamp_ticks;
+    if (SUCCEEDED(result) && pending_video_sample_ != nullptr) {
+      int64_t previous_end_ticks = 0;
+      result = WritePendingVideoFrame(normalized_offset_ticks,
+                                      &previous_end_ticks);
+      normalized_offset_ticks = previous_end_ticks;
+      if (SUCCEEDED(result) &&
+          normalized_offset_ticks == std::numeric_limits<int64_t>::max()) {
+        result = HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
+      }
     }
     if (SUCCEEDED(result)) {
-      result = sample->SetSampleDuration(frame_duration_ticks_);
+      pending_video_sample_ = std::move(sample);
+      pending_video_sample_offset_ticks_ = normalized_offset_ticks;
+    }
+    return result;
+  }
+
+  HRESULT WritePendingVideoFrame(int64_t end_offset_ticks,
+                                 int64_t* actual_end_ticks) {
+    if (sink_writer_ == nullptr || pending_video_sample_ == nullptr ||
+        actual_end_ticks == nullptr) {
+      return E_UNEXPECTED;
+    }
+    const MediaSampleTiming timing = CalculateMediaSampleTiming(
+        pending_video_sample_offset_ticks_, end_offset_ticks);
+    HRESULT result =
+        pending_video_sample_->SetSampleTime(timing.timestamp_ticks);
+    if (SUCCEEDED(result)) {
+      result = pending_video_sample_->SetSampleDuration(timing.duration_ticks);
     }
     if (SUCCEEDED(result)) {
-      result = sink_writer_->WriteSample(sink_stream_index_, sample.Get());
+      result = sink_writer_->WriteSample(sink_stream_index_,
+                                         pending_video_sample_.Get());
+    }
+    if (SUCCEEDED(result)) {
+      *actual_end_ticks = timing.end_ticks;
+      pending_video_sample_.Reset();
+      pending_video_sample_offset_ticks_ = 0;
     }
     return result;
   }
@@ -1981,40 +2075,50 @@ class CaptureService::Impl {
       ResetChunkState(true);
       return;
     }
-    if (sink_writer_ == nullptr) {
+    if (sink_writer_ == nullptr || pending_video_sample_ == nullptr) {
       EmitError("videoWriterUnavailable",
-                "The partial MP4 was retained because the writer was unavailable",
+                "The MP4 chunk was discarded because its writer state was "
+                "incomplete",
                 E_UNEXPECTED, true);
-      ResetChunkState(false);
+      ResetChunkState(true);
+      return;
+    }
+    const SteadyClock::time_point regular_chunk_end =
+        chunk_start_steady_ +
+        std::chrono::seconds(config_.chunk_duration_seconds);
+    const SteadyClock::time_point effective_end =
+        std::clamp(now, chunk_start_steady_, regular_chunk_end);
+    const int64_t elapsed_ticks = SteadyElapsedMediaFoundationTicks(
+        chunk_start_steady_, effective_end);
+    int64_t encoded_duration_ticks = 0;
+    const HRESULT flush_result =
+        WritePendingVideoFrame(elapsed_ticks, &encoded_duration_ticks);
+    if (FAILED(flush_result)) {
+      EmitError("videoFrameFlushFailed",
+                "Unable to flush the final frame to the MP4 chunk",
+                flush_result, true);
+      ResetChunkState(true);
       return;
     }
     const HRESULT finalize_result = sink_writer_->Finalize();
     sink_writer_.Reset();
     if (FAILED(finalize_result)) {
       EmitError("videoFinalizeFailed", "Unable to finalize the MP4 chunk",
-                finalize_result, true);
-      ResetChunkState(false);
+                 finalize_result, true);
+      ResetChunkState(true);
       return;
     }
     if (!MoveFileExW(temporary_video_path_.c_str(), final_video_path_.c_str(),
                      MOVEFILE_WRITE_THROUGH)) {
       const HRESULT move_result = HRESULT_FROM_WIN32(GetLastError());
       EmitError("videoCommitFailed", "Unable to commit the MP4 chunk",
-                move_result, true);
-      ResetChunkState(false);
+                 move_result, true);
+      ResetChunkState(true);
       return;
     }
     owns_temporary_video_ = false;
     owns_final_video_ = true;
 
-    const int64_t elapsed_ms = std::max<int64_t>(
-        1, std::chrono::duration_cast<std::chrono::milliseconds>(
-               now - chunk_start_steady_)
-               .count());
-    const int64_t encoded_duration_ms = std::max<int64_t>(
-        1, static_cast<int64_t>(std::llround(
-               static_cast<double>(chunk_progress_.frame_count()) * 1000.0 /
-               kCaptureFramesPerSecond)));
     ChunkResult chunk;
     chunk.session_id = config_.session_id;
     chunk.chunk_id = chunk_id_;
@@ -2022,13 +2126,16 @@ class CaptureService::Impl {
     chunk.video_path = Utf8FromWide(final_video_path_.wstring());
     chunk.metadata_path = Utf8FromWide(metadata_path_.wstring());
     chunk.start_time_ms = chunk_start_time_ms_;
-    chunk.duration_ms = CalculateChunkDurationMs(
-        elapsed_ms, encoded_duration_ms,
-        chunk_progress_.latest_frame_offset_ms());
+    chunk.duration_ms =
+        MediaFoundationTicksToDurationMs(encoded_duration_ticks);
     chunk.end_time_ms = chunk.start_time_ms + chunk.duration_ms;
     chunk.video_frame_count = chunk_progress_.frame_count();
     chunk.video_width = video_width_;
     chunk.video_height = video_height_;
+    chunk.capture_interval_seconds = config_.capture_interval_seconds;
+    chunk.video_frame_rate_numerator = frame_rate_numerator_;
+    chunk.video_frame_rate_denominator = frame_rate_denominator_;
+    chunk.video_frame_duration_ticks = frame_duration_ticks_;
     chunk.virtual_left = chunk_virtual_left_;
     chunk.virtual_top = chunk_virtual_top_;
     chunk.virtual_width = chunk_virtual_width_;
@@ -2041,7 +2148,7 @@ class CaptureService::Impl {
     if (!WriteUtf8FileAtomically(metadata_path_, BuildMetadataJson(chunk),
                                  &metadata_error)) {
       EmitError("metadataWriteFailed", metadata_error, E_FAIL, true);
-      ResetChunkState(false);
+      ResetChunkState(true);
       return;
     }
     owns_metadata_ = true;
@@ -2057,8 +2164,10 @@ class CaptureService::Impl {
   std::string BuildMetadataJson(const ChunkResult& chunk) const {
     std::ostringstream output;
     output << "{\n"
-           << "  \"schemaVersion\": 3,\n"
+           << "  \"schemaVersion\": 4,\n"
            << "  \"captureScope\": \"active-window-display\",\n"
+           << "  \"captureIntervalSeconds\": "
+           << chunk.capture_interval_seconds << ",\n"
            << "  \"sessionId\": \"" << JsonEscape(chunk.session_id)
            << "\",\n"
            << "  \"chunkId\": \"" << JsonEscape(chunk.chunk_id)
@@ -2072,7 +2181,12 @@ class CaptureService::Impl {
            << ", \"height\": " << chunk.virtual_height << "},\n"
            << "  \"video\": {\"path\": \""
            << JsonEscape(chunk.video_path) << "\", \"codec\": \"h264\", "
-           << "\"container\": \"mp4\", \"fps\": 1"
+           << "\"container\": \"mp4\", \"frameRateNumerator\": "
+           << chunk.video_frame_rate_numerator
+           << ", \"frameRateDenominator\": "
+           << chunk.video_frame_rate_denominator
+           << ", \"frameDurationTicks\": "
+           << chunk.video_frame_duration_ticks
            << ", \"frameCount\": " << chunk.video_frame_count
            << ", \"width\": " << chunk.video_width
            << ", \"height\": " << chunk.video_height << "},\n"
@@ -2136,6 +2250,8 @@ class CaptureService::Impl {
   }
 
   void ResetChunkState(bool remove_artifacts) {
+    pending_video_sample_.Reset();
+    pending_video_sample_offset_ticks_ = 0;
     sink_writer_.Reset();
     if (remove_artifacts) {
       if (owns_temporary_video_ && !temporary_video_path_.empty()) {
@@ -2251,11 +2367,14 @@ class CaptureService::Impl {
   const uint32_t logical_processor_count_ = LogicalProcessorCount();
 
   ComPtr<IMFSinkWriter> sink_writer_;
+  ComPtr<IMFSample> pending_video_sample_;
+  int64_t pending_video_sample_offset_ticks_ = 0;
   DWORD sink_stream_index_ = 0;
   uint32_t frame_rate_numerator_ = 1;
   uint32_t frame_rate_denominator_ = 1;
   LONGLONG frame_duration_ticks_ = kMediaFoundationTicksPerSecond;
-  CaptureChunkProgress chunk_progress_{60};
+  CaptureSchedule capture_schedule_{1};
+  CaptureChunkProgress chunk_progress_{60'000};
   uint32_t video_width_ = 0;
   uint32_t video_height_ = 0;
 };
@@ -2361,7 +2480,8 @@ bool CaptureService::ExtractVideoFrames(
   const uint32_t target_count =
       std::min(config.max_frames, std::max<uint32_t>(1, estimated_count));
   uint64_t total_bytes = 0;
-  LONGLONG previous_timestamp = -1;
+  LONGLONG previous_decoded_timestamp = -1;
+  FrameSimilarityFilter similarity_filter;
   for (uint32_t index = 0; SUCCEEDED(result) && index < target_count; ++index) {
     LONGLONG target_ticks = duration_ticks / 2;
     if (target_count > 1) {
@@ -2398,7 +2518,7 @@ bool CaptureService::ExtractVideoFrames(
         result = E_FAIL;
         break;
       }
-      if (sample != nullptr && timestamp <= previous_timestamp) {
+      if (sample != nullptr && timestamp <= previous_decoded_timestamp) {
         sample.Reset();
       }
     }
@@ -2412,6 +2532,7 @@ bool CaptureService::ExtractVideoFrames(
       }
       break;
     }
+    previous_decoded_timestamp = timestamp;
 
     ComPtr<IMFMediaType> current_type;
     result = reader->GetCurrentMediaType(kSourceReaderFirstVideoStream,
@@ -2422,6 +2543,11 @@ bool CaptureService::ExtractVideoFrames(
     if (SUCCEEDED(result)) {
       result = CopySampleToBgra(sample.Get(), current_type.Get(), &pixels,
                                 &width, &height);
+    }
+    if (SUCCEEDED(result) &&
+        !similarity_filter.ShouldRetain(pixels.data(), pixels.size(), width,
+                                        height)) {
+      continue;
     }
     ExtractedVideoFrame frame;
     if (SUCCEEDED(result)) {
@@ -2436,7 +2562,6 @@ bool CaptureService::ExtractVideoFrames(
       if (total_bytes > config.max_total_bytes) {
         result = HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE);
       } else {
-        previous_timestamp = timestamp;
         frames->push_back(std::move(frame));
       }
     }

@@ -40,6 +40,13 @@ void main() {
     );
     expect(
       isSupportedVideoMetadataScope(
+        schemaVersion: 4,
+        captureScope: 'active-window-display',
+      ),
+      isTrue,
+    );
+    expect(
+      isSupportedVideoMetadataScope(
         schemaVersion: 2,
         captureScope: 'active-window-display',
       ),
@@ -316,6 +323,244 @@ void main() {
     expect(evidence.resourceSamples.last.memoryCommitBytes, 320 * 1024 * 1024);
   });
 
+  test(
+    'schema 4 interval MP4 validates rational timing and extracts',
+    () async {
+      final directory = Directory(p.join(root.path, 'schema-4'));
+      await directory.create(recursive: true);
+      final video = File(p.join(directory.path, 'chunk_5000_1.mp4'));
+      final metadata = File(p.join(directory.path, 'chunk_5000_1.json'));
+      await video.writeAsBytes(<int>[0, 0, 0, 1]);
+      await metadata.writeAsString(
+        jsonEncode(<String, Object?>{
+          'schemaVersion': 4,
+          'captureScope': 'active-window-display',
+          'captureIntervalSeconds': 20,
+          'startTimeMs': 5000,
+          'endTimeMs': 65000,
+          'durationMs': 60000,
+          'virtualDesktop': <String, Object?>{
+            'left': 0,
+            'top': 0,
+            'width': 1920,
+            'height': 1080,
+          },
+          'video': <String, Object?>{
+            'path': video.path,
+            'codec': 'h264',
+            'container': 'mp4',
+            'frameRateNumerator': 1,
+            'frameRateDenominator': 20,
+            'frameDurationTicks': 200000000,
+            'frameCount': 3,
+            'width': 1920,
+            'height': 1080,
+          },
+          'displays': <Object?>[
+            <String, Object?>{
+              'id': r'\\.\DISPLAY1',
+              'left': 0,
+              'top': 0,
+              'width': 1920,
+              'height': 1080,
+            },
+          ],
+          'sourceChanges': <Object?>[
+            <String, Object?>{
+              'timestampMs': 5000,
+              'offsetMs': 0,
+              'displayId': r'\\.\DISPLAY1',
+              'left': 0,
+              'top': 0,
+              'width': 1920,
+              'height': 1080,
+            },
+          ],
+          'windowRecords': <Object?>[
+            for (var second = 0; second < 60; second++)
+              <String, Object?>{
+                'timestampMs': 5000 + second * 1000,
+                'offsetMs': second * 1000,
+                'processId': 42,
+                'processName': 'Code.exe',
+                'appName': 'Visual Studio Code',
+                'windowTitle': 'capture_runtime_test.cpp',
+                'cpuUsagePercent': second == 0 ? null : 4.5,
+                'memoryCommitBytes': 256 * 1024 * 1024,
+              },
+          ],
+        }),
+      );
+      const channel = MethodChannel('qi_day_flow/test/schema-4-evidence');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        expect(call.method, 'extractVideoFrames');
+        expect(
+          (call.arguments as Map<Object?, Object?>)['expectedFrameCount'],
+          3,
+        );
+        return <Object?>[
+          <String, Object?>{
+            'offsetMs': 0,
+            'jpegBytes': Uint8List.fromList(<int>[0xFF, 0xD8, 0xFF, 0xD9]),
+          },
+          <String, Object?>{
+            'offsetMs': 40000,
+            'jpegBytes': Uint8List.fromList(<int>[0xFF, 0xD8, 0xFF, 0xD9]),
+          },
+        ];
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      final chunk = _chunk(
+        directory: directory.path,
+        metadataPath: metadata.path,
+        videoPath: video.path,
+        frameCount: 3,
+        startedAtMs: 5000,
+        endedAtMs: 65000,
+      );
+
+      final evidence = await ChunkEvidenceReader(
+        nativeService: NativeCaptureService(methodChannel: channel),
+      ).read(chunk);
+
+      expect(evidence.keyFrames, hasLength(2));
+      expect(evidence.keyFrames.last.offsetSeconds, 40);
+      expect(evidence.resourceSamples, hasLength(60));
+      expect(evidence.resourceSamples.last.offsetSeconds, 59);
+    },
+  );
+
+  test('schema 4 evidence strictly validates chunk timing and count', () async {
+    final invalidChunks = <CaptureChunk>[
+      await _writeStrictVideoChunk(
+        root: root,
+        label: 'inverted',
+        schemaVersion: 4,
+        startTimeMs: 3000,
+        endTimeMs: 1000,
+        durationMs: -2000,
+        chunkStartTimeMs: 1000,
+        chunkEndTimeMs: 3000,
+        frameCount: 1,
+      ),
+      await _writeStrictVideoChunk(
+        root: root,
+        label: 'mismatch',
+        schemaVersion: 4,
+        durationMs: 59000,
+        frameCount: 2,
+      ),
+      await _writeStrictVideoChunk(
+        root: root,
+        label: 'too-long',
+        schemaVersion: 4,
+        endTimeMs: 61001,
+        durationMs: 60001,
+        frameCount: 2,
+      ),
+      await _writeStrictVideoChunk(
+        root: root,
+        label: 'too-many-frames',
+        schemaVersion: 4,
+        captureIntervalSeconds: 30,
+        frameCount: 3,
+      ),
+    ];
+
+    for (final chunk in invalidChunks) {
+      await expectLater(
+        const ChunkEvidenceReader().read(chunk),
+        throwsFormatException,
+      );
+    }
+  });
+
+  test('schema 4 evidence accepts valid partial interval chunks', () async {
+    const channel = MethodChannel('qi_day_flow/test/partial-schema-4');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      expect(call.method, 'extractVideoFrames');
+      return <Object?>[
+        <String, Object?>{
+          'offsetMs': 0,
+          'jpegBytes': Uint8List.fromList(<int>[0xFF, 0xD8, 0xFF, 0xD9]),
+        },
+      ];
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    final chunks = <CaptureChunk>[
+      await _writeStrictVideoChunk(
+        root: root,
+        label: 'partial-2s',
+        schemaVersion: 4,
+        endTimeMs: 3000,
+        durationMs: 2000,
+        captureIntervalSeconds: 30,
+        frameCount: 1,
+      ),
+      await _writeStrictVideoChunk(
+        root: root,
+        label: 'partial-31s',
+        schemaVersion: 4,
+        endTimeMs: 32000,
+        durationMs: 31000,
+        captureIntervalSeconds: 30,
+        frameCount: 2,
+      ),
+    ];
+    final reader = ChunkEvidenceReader(
+      nativeService: NativeCaptureService(methodChannel: channel),
+    );
+
+    for (final chunk in chunks) {
+      final evidence = await reader.read(chunk);
+      expect(evidence.keyFrames, hasLength(1));
+    }
+  });
+
+  test('schema 3 evidence rejects invalid bounded timing', () async {
+    final invalidChunks = <CaptureChunk>[
+      await _writeStrictVideoChunk(
+        root: root,
+        label: 'v3-inverted',
+        schemaVersion: 3,
+        startTimeMs: 3000,
+        endTimeMs: 1000,
+        chunkStartTimeMs: 1000,
+        chunkEndTimeMs: 3000,
+        frameCount: 1,
+      ),
+      await _writeStrictVideoChunk(
+        root: root,
+        label: 'v3-mismatch',
+        schemaVersion: 3,
+        endTimeMs: 3000,
+        durationMs: 1999,
+        includeDuration: true,
+        frameCount: 1,
+      ),
+      await _writeStrictVideoChunk(
+        root: root,
+        label: 'v3-too-long',
+        schemaVersion: 3,
+        endTimeMs: 61001,
+        durationMs: 60001,
+        includeDuration: true,
+        frameCount: 60,
+      ),
+    ];
+
+    for (final chunk in invalidChunks) {
+      await expectLater(
+        const ChunkEvidenceReader().read(chunk),
+        throwsFormatException,
+      );
+    }
+  });
+
   test('schema 3 rejects a source change for an unknown display', () async {
     final directory = Directory(p.join(root.path, 'invalid-source'));
     await directory.create(recursive: true);
@@ -402,5 +647,78 @@ CaptureChunk _chunk({
     status: status,
     createdAtMs: startedAtMs,
     updatedAtMs: startedAtMs,
+  );
+}
+
+Future<CaptureChunk> _writeStrictVideoChunk({
+  required Directory root,
+  required String label,
+  required int schemaVersion,
+  int startTimeMs = 1000,
+  int endTimeMs = 61000,
+  int? durationMs,
+  bool includeDuration = false,
+  int? chunkStartTimeMs,
+  int? chunkEndTimeMs,
+  int captureIntervalSeconds = 30,
+  int frameCount = 2,
+}) async {
+  final directory = Directory(p.join(root.path, label));
+  await directory.create(recursive: true);
+  final video = File(p.join(directory.path, 'chunk_$label.mp4'));
+  final metadata = File(p.join(directory.path, 'chunk_$label.json'));
+  await video.writeAsBytes(<int>[0, 0, 0, 1]);
+  final json = <String, Object?>{
+    'schemaVersion': schemaVersion,
+    'captureScope': 'active-window-display',
+    'startTimeMs': startTimeMs,
+    'endTimeMs': endTimeMs,
+    'virtualDesktop': <String, Object?>{
+      'left': 0,
+      'top': 0,
+      'width': 1920,
+      'height': 1080,
+    },
+    'video': <String, Object?>{
+      'path': video.path,
+      'codec': 'h264',
+      'container': 'mp4',
+      'frameCount': frameCount,
+      'width': 1920,
+      'height': 1080,
+    },
+    'displays': <Object?>[
+      <String, Object?>{
+        'id': r'\\.\DISPLAY1',
+        'left': 0,
+        'top': 0,
+        'width': 1920,
+        'height': 1080,
+      },
+    ],
+    'sourceChanges': <Object?>[],
+    'windowRecords': <Object?>[],
+  };
+  final videoJson = json['video']! as Map<String, Object?>;
+  if (schemaVersion == 4) {
+    json['captureIntervalSeconds'] = captureIntervalSeconds;
+    json['durationMs'] = durationMs ?? endTimeMs - startTimeMs;
+    videoJson['frameRateNumerator'] = 1;
+    videoJson['frameRateDenominator'] = captureIntervalSeconds;
+    videoJson['frameDurationTicks'] = captureIntervalSeconds * 10000000;
+  } else {
+    videoJson['fps'] = 1;
+    if (includeDuration) {
+      json['durationMs'] = durationMs;
+    }
+  }
+  await metadata.writeAsString(jsonEncode(json));
+  return _chunk(
+    directory: directory.path,
+    metadataPath: metadata.path,
+    videoPath: video.path,
+    frameCount: frameCount,
+    startedAtMs: chunkStartTimeMs ?? startTimeMs,
+    endedAtMs: chunkEndTimeMs ?? endTimeMs,
   );
 }

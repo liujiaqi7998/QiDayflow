@@ -13,7 +13,8 @@ bool isSupportedVideoMetadataScope({
   required Object? captureScope,
 }) =>
     (schemaVersion == 2 && captureScope == 'all-displays') ||
-    (schemaVersion == 3 && captureScope == activeWindowDisplayCaptureScope);
+    ((schemaVersion == 3 || schemaVersion == 4) &&
+        captureScope == activeWindowDisplayCaptureScope);
 
 class ChunkEvidence {
   const ChunkEvidence({
@@ -136,7 +137,7 @@ class ChunkEvidenceReader {
         video['container'] != 'mp4') {
       throw const FormatException('MP4 元数据与数据库不一致');
     }
-    if (json['schemaVersion'] == 3) {
+    if (json['schemaVersion'] == 3 || json['schemaVersion'] == 4) {
       _validateActiveDisplayMetadata(json, video, durationMs);
     }
     if (!await File(normalizedVideoPath).exists()) {
@@ -175,16 +176,49 @@ class ChunkEvidenceReader {
     Map<String, Object?> video,
     int durationMs,
   ) {
+    final schemaVersion = json['schemaVersion'];
+    final chunkStartTimeMs = json['startTimeMs'];
+    final chunkEndTimeMs = json['endTimeMs'];
+    if (chunkStartTimeMs is! int ||
+        chunkEndTimeMs is! int ||
+        chunkEndTimeMs <= chunkStartTimeMs ||
+        chunkEndTimeMs - chunkStartTimeMs != durationMs ||
+        durationMs < 1 ||
+        durationMs > 60000) {
+      throw FormatException('schema $schemaVersion 切片时长无效');
+    }
+    final declaredDurationMs = json['durationMs'];
+    if ((schemaVersion == 4 && declaredDurationMs is! int) ||
+        (declaredDurationMs != null && declaredDurationMs != durationMs)) {
+      throw FormatException('schema $schemaVersion durationMs 与时间范围不一致');
+    }
     final frameCount = video['frameCount'];
-    final fps = video['fps'];
-    if (fps is! num ||
-        fps.toDouble() != captureFramesPerSecond.toDouble() ||
-        frameCount is! int ||
+    if (frameCount is! int ||
         frameCount < 1 ||
-        frameCount > calculateRegularChunkFrameCount() ||
         video['width'] != captureVideoWidth ||
         video['height'] != captureVideoHeight) {
-      throw const FormatException('schema 3 视频规格无效');
+      throw FormatException('schema $schemaVersion 视频规格无效');
+    }
+    if (schemaVersion == 3) {
+      final fps = video['fps'];
+      if (fps is! num ||
+          fps.toDouble() != captureFramesPerSecond.toDouble() ||
+          frameCount > (durationMs + 999) ~/ 1000) {
+        throw const FormatException('schema 3 视频规格无效');
+      }
+    } else {
+      final captureIntervalSeconds = json['captureIntervalSeconds'];
+      if (captureIntervalSeconds is! int ||
+          !const <int>{1, 10, 20, 30}.contains(captureIntervalSeconds) ||
+          json['durationMs'] != durationMs ||
+          video['frameRateNumerator'] != 1 ||
+          video['frameRateDenominator'] != captureIntervalSeconds ||
+          video['frameDurationTicks'] != captureIntervalSeconds * 10000000 ||
+          frameCount >
+              (durationMs + captureIntervalSeconds * 1000 - 1) ~/
+                  (captureIntervalSeconds * 1000)) {
+        throw const FormatException('schema 4 视频规格无效');
+      }
     }
 
     final rawDisplays = json['displays'];

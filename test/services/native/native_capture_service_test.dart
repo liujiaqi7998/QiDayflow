@@ -7,16 +7,17 @@ import 'package:qi_day_flow/services/native/native_capture_service.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  test('capture configuration uses the fixed active-display video spec', () {
+  test('capture configuration sends an integer capture interval', () {
     const configuration = NativeCaptureConfiguration(
       outputDirectory: r'C:\QiDayFlow\captures',
       sessionId: '42',
+      captureIntervalSeconds: 20,
     );
 
     expect(configuration.toMap(), <String, Object>{
       'outputDirectory': r'C:\QiDayFlow\captures',
       'sessionId': '42',
-      'fps': 1,
+      'captureIntervalSeconds': 20,
       'chunkDurationSeconds': 60,
       'maxWidth': 1920,
       'maxHeight': 1080,
@@ -24,6 +25,7 @@ void main() {
       'idleTimeoutSeconds': 600,
     });
     expect(configuration.toMap().containsKey('displayId'), isFalse);
+    expect(configuration.toMap().containsKey('fps'), isFalse);
   });
 
   test('parses a flat MP4 and JSON chunk event', () {
@@ -77,6 +79,10 @@ void main() {
     expect(chunk.captureScope, activeWindowDisplayCaptureScope);
     expect(chunk.videoWidth, 1920);
     expect(chunk.videoHeight, 1080);
+    expect(chunk.captureIntervalSeconds, 1);
+    expect(chunk.videoFrameRateNumerator, 1);
+    expect(chunk.videoFrameRateDenominator, 1);
+    expect(chunk.videoFrameDurationTicks, 10000000);
     expect(chunk.windowRecords, hasLength(2));
     expect(chunk.windowRecords.first.timestampMs, 1000);
     expect(chunk.windowRecords.first.processId, 42);
@@ -84,6 +90,117 @@ void main() {
     expect(chunk.windowRecords.first.memoryCommitBytes, 256 * 1024 * 1024);
     expect(chunk.windowRecords.last.cpuUsagePercent, 12.5);
     expect(chunk.windowRecords.last.memoryCommitBytes, isNull);
+  });
+
+  test('parses schema 4 interval and actual video timing', () {
+    final event = NativeCaptureEvent.fromMap(<Object?, Object?>{
+      'type': 'chunkCompleted',
+      'schemaVersion': 4,
+      'captureScope': 'active-window-display',
+      'captureIntervalSeconds': 20,
+      'sessionId': '42',
+      'chunkId': 'chunk_42_1000_2',
+      'directoryPath': r'C:\captures',
+      'videoPath': r'C:\captures\chunk_42_1000_2.mp4',
+      'metadataPath': r'C:\captures\chunk_42_1000_2.json',
+      'startTimeMs': 1000,
+      'endTimeMs': 61000,
+      'durationMs': 60000,
+      'frameCount': 3,
+      'videoWidth': 1920,
+      'videoHeight': 1080,
+      'videoFrameRateNumerator': 1,
+      'videoFrameRateDenominator': 20,
+      'videoFrameDurationTicks': 200000000,
+      'windowRecords': <Object?>[],
+    });
+
+    expect(event, isA<NativeChunkCompletedEvent>());
+    final chunk = event as NativeChunkCompletedEvent;
+    expect(chunk.schemaVersion, 4);
+    expect(chunk.captureIntervalSeconds, 20);
+    expect(chunk.videoFrameRateNumerator, 1);
+    expect(chunk.videoFrameRateDenominator, 20);
+    expect(chunk.videoFrameDurationTicks, 200000000);
+  });
+
+  test('schema 4 native event rejects inconsistent video timing', () {
+    expect(
+      () => NativeCaptureEvent.fromMap(<Object?, Object?>{
+        'type': 'chunkCompleted',
+        'schemaVersion': 4,
+        'captureScope': 'active-window-display',
+        'captureIntervalSeconds': 10,
+        'sessionId': '42',
+        'chunkId': 'chunk_42_1000_3',
+        'directoryPath': r'C:\captures',
+        'videoPath': r'C:\captures\chunk_42_1000_3.mp4',
+        'metadataPath': r'C:\captures\chunk_42_1000_3.json',
+        'startTimeMs': 1000,
+        'endTimeMs': 61000,
+        'frameCount': 6,
+        'videoWidth': 1920,
+        'videoHeight': 1080,
+        'videoFrameRateNumerator': 1,
+        'videoFrameRateDenominator': 1,
+        'videoFrameDurationTicks': 10000000,
+        'windowRecords': <Object?>[],
+      }),
+      throwsFormatException,
+    );
+  });
+
+  test('schema 4 native event strictly validates chunk timing and count', () {
+    for (final event in <Map<Object?, Object?>>[
+      _schema4ChunkEvent(startTimeMs: 61000, endTimeMs: 1000),
+      _schema4ChunkEvent(durationMs: 59000),
+      _schema4ChunkEvent(endTimeMs: 61001, durationMs: 60001),
+      _schema4ChunkEvent(captureIntervalSeconds: 30, frameCount: 3),
+    ]) {
+      expect(() => NativeCaptureEvent.fromMap(event), throwsFormatException);
+    }
+  });
+
+  test('schema 4 native event accepts valid partial interval chunks', () {
+    final twoSecond =
+        NativeCaptureEvent.fromMap(
+              _schema4ChunkEvent(
+                endTimeMs: 3000,
+                durationMs: 2000,
+                captureIntervalSeconds: 30,
+                frameCount: 1,
+              ),
+            )
+            as NativeChunkCompletedEvent;
+    final thirtyOneSecond =
+        NativeCaptureEvent.fromMap(
+              _schema4ChunkEvent(
+                endTimeMs: 32000,
+                durationMs: 31000,
+                captureIntervalSeconds: 30,
+                frameCount: 2,
+              ),
+            )
+            as NativeChunkCompletedEvent;
+
+    expect(twoSecond.frameCount, 1);
+    expect(thirtyOneSecond.frameCount, 2);
+  });
+
+  test('schema 3 native event retains bounded compatible timing', () {
+    final valid = _schema3ChunkEvent(
+      endTimeMs: 3000,
+      durationMs: 2000,
+      frameCount: 1,
+    );
+    expect(NativeCaptureEvent.fromMap(valid), isA<NativeChunkCompletedEvent>());
+    for (final event in <Map<Object?, Object?>>[
+      _schema3ChunkEvent(startTimeMs: 3000, endTimeMs: 1000),
+      _schema3ChunkEvent(endTimeMs: 3000, durationMs: 1999),
+      _schema3ChunkEvent(endTimeMs: 61001, durationMs: 60001),
+    ]) {
+      expect(() => NativeCaptureEvent.fromMap(event), throwsFormatException);
+    }
   });
 
   test('rejects legacy scope on a newly completed native event', () {
@@ -167,11 +284,19 @@ void main() {
     );
   });
 
-  test('regular chunks rotate exactly at the sixtieth frame', () {
-    expect(calculateRegularChunkFrameCount(), 60);
-    expect(hasReachedRegularChunkBoundary(59), isFalse);
-    expect(hasReachedRegularChunkBoundary(60), isTrue);
-    expect(hasReachedRegularChunkBoundary(61), isTrue);
+  test('regular chunks use interval counts but elapsed-time boundaries', () {
+    expect(
+      <int>[1, 10, 20, 30]
+          .map(
+            (interval) => calculateRegularChunkFrameCount(
+              captureIntervalSeconds: interval,
+            ),
+          )
+          .toList(),
+      <int>[60, 6, 3, 2],
+    );
+    expect(hasReachedRegularChunkBoundary(elapsedMilliseconds: 59999), isFalse);
+    expect(hasReachedRegularChunkBoundary(elapsedMilliseconds: 60000), isTrue);
   });
 
   test(
@@ -360,4 +485,95 @@ void main() {
       );
     },
   );
+
+  test(
+    'directory Explorer request uses the exact method and path map',
+    () async {
+      const channel = MethodChannel('qi_day_flow/test/open-directory');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      var calls = 0;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        calls++;
+        expect(call.method, 'openDirectoryInExplorer');
+        expect(call.arguments, <String, Object>{
+          'directoryPath': r'C:\QiDayFlow',
+        });
+        return calls == 1 ? <String, Object>{'opened': true} : true;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      final service = NativeCaptureService(methodChannel: channel);
+
+      expect(await service.openDirectoryInExplorer(r'C:\QiDayFlow'), isTrue);
+      expect(await service.openDirectoryInExplorer(r'C:\QiDayFlow'), isTrue);
+      expect(calls, 2);
+    },
+  );
+
+  test('directory Explorer request rejects a relative Windows path', () async {
+    final service = NativeCaptureService(
+      methodChannel: const MethodChannel('qi_day_flow/test/unused-directory'),
+    );
+
+    await expectLater(
+      service.openDirectoryInExplorer(r'.\QiDayFlow'),
+      throwsArgumentError,
+    );
+  });
+}
+
+Map<Object?, Object?> _schema4ChunkEvent({
+  int startTimeMs = 1000,
+  int endTimeMs = 61000,
+  int durationMs = 60000,
+  int captureIntervalSeconds = 30,
+  int frameCount = 2,
+}) => <Object?, Object?>{
+  'type': 'chunkCompleted',
+  'schemaVersion': 4,
+  'captureScope': 'active-window-display',
+  'captureIntervalSeconds': captureIntervalSeconds,
+  'sessionId': '42',
+  'chunkId': 'chunk_42_1000_strict',
+  'directoryPath': r'C:\captures',
+  'videoPath': r'C:\captures\chunk_42_1000_strict.mp4',
+  'metadataPath': r'C:\captures\chunk_42_1000_strict.json',
+  'startTimeMs': startTimeMs,
+  'endTimeMs': endTimeMs,
+  'durationMs': durationMs,
+  'frameCount': frameCount,
+  'videoWidth': 1920,
+  'videoHeight': 1080,
+  'videoFrameRateNumerator': 1,
+  'videoFrameRateDenominator': captureIntervalSeconds,
+  'videoFrameDurationTicks': captureIntervalSeconds * 10000000,
+  'windowRecords': <Object?>[],
+};
+
+Map<Object?, Object?> _schema3ChunkEvent({
+  int startTimeMs = 1000,
+  int endTimeMs = 61000,
+  int? durationMs,
+  int frameCount = 60,
+}) {
+  final event = <Object?, Object?>{
+    'type': 'chunkCompleted',
+    'schemaVersion': 3,
+    'captureScope': 'active-window-display',
+    'sessionId': '42',
+    'chunkId': 'chunk_42_1000_legacy',
+    'directoryPath': r'C:\captures',
+    'videoPath': r'C:\captures\chunk_42_1000_legacy.mp4',
+    'metadataPath': r'C:\captures\chunk_42_1000_legacy.json',
+    'startTimeMs': startTimeMs,
+    'endTimeMs': endTimeMs,
+    'frameCount': frameCount,
+    'videoWidth': 1920,
+    'videoHeight': 1080,
+    'windowRecords': <Object?>[],
+  };
+  if (durationMs != null) {
+    event['durationMs'] = durationMs;
+  }
+  return event;
 }

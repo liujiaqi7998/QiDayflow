@@ -7,6 +7,7 @@ enum AppLogLevel { debug, info, warning, error }
 
 final class AppSettings {
   static const String defaultApiModel = 'gpt-5.4-mini';
+  static const Set<int> supportedCaptureIntervalSeconds = <int>{1, 10, 20, 30};
 
   AppSettings({
     required String apiUrl,
@@ -17,7 +18,7 @@ final class AppSettings {
     required this.cacheLimitGb,
     required this.idlePauseEnabled,
     required this.idlePauseSeconds,
-    required this.captureFps,
+    this.captureIntervalSeconds = 1,
     required this.chunkDurationSeconds,
     required this.themeMode,
     this.logLevel = AppLogLevel.info,
@@ -47,8 +48,12 @@ final class AppSettings {
     if (idlePauseSeconds < 60 || idlePauseSeconds > 3600) {
       throw RangeError.range(idlePauseSeconds, 60, 3600, 'idlePauseSeconds');
     }
-    if (captureFps < 1 || captureFps > 10) {
-      throw RangeError.range(captureFps, 1, 10, 'captureFps');
+    if (!supportedCaptureIntervalSeconds.contains(captureIntervalSeconds)) {
+      throw ArgumentError.value(
+        captureIntervalSeconds,
+        'captureIntervalSeconds',
+        'must be one of 1, 10, 20, or 30',
+      );
     }
     if (chunkDurationSeconds < 10 || chunkDurationSeconds > 3600) {
       throw RangeError.range(
@@ -71,6 +76,7 @@ final class AppSettings {
       'cacheLimitGb',
       'idlePauseEnabled',
       'idlePauseSeconds',
+      'captureIntervalSeconds',
       'captureFps',
       'chunkDurationSeconds',
       'themeMode',
@@ -90,7 +96,7 @@ final class AppSettings {
       cacheLimitGb: jsonInt(json, 'cacheLimitGb'),
       idlePauseEnabled: jsonBool(json, 'idlePauseEnabled'),
       idlePauseSeconds: jsonInt(json, 'idlePauseSeconds'),
-      captureFps: jsonInt(json, 'captureFps'),
+      captureIntervalSeconds: _captureIntervalSecondsFromJson(json),
       chunkDurationSeconds: jsonInt(json, 'chunkDurationSeconds'),
       themeMode: AppThemeMode.values.byName(jsonString(json, 'themeMode')),
       logLevel: json.containsKey('logLevel')
@@ -107,7 +113,7 @@ final class AppSettings {
         cacheLimitGb: 5,
         idlePauseEnabled: true,
         idlePauseSeconds: 600,
-        captureFps: 1,
+        captureIntervalSeconds: 1,
         chunkDurationSeconds: 60,
         themeMode: AppThemeMode.system,
         logLevel: AppLogLevel.info,
@@ -120,7 +126,7 @@ final class AppSettings {
   final int cacheLimitGb;
   final bool idlePauseEnabled;
   final int idlePauseSeconds;
-  final int captureFps;
+  final int captureIntervalSeconds;
   final int chunkDurationSeconds;
   final AppThemeMode themeMode;
   final AppLogLevel logLevel;
@@ -137,7 +143,7 @@ final class AppSettings {
     'cacheLimitGb': cacheLimitGb,
     'idlePauseEnabled': idlePauseEnabled,
     'idlePauseSeconds': idlePauseSeconds,
-    'captureFps': captureFps,
+    'captureIntervalSeconds': captureIntervalSeconds,
     'chunkDurationSeconds': chunkDurationSeconds,
     'themeMode': themeMode.name,
     'logLevel': logLevel.name,
@@ -153,7 +159,7 @@ final class AppSettings {
     int? cacheLimitGb,
     bool? idlePauseEnabled,
     int? idlePauseSeconds,
-    int? captureFps,
+    int? captureIntervalSeconds,
     int? chunkDurationSeconds,
     AppThemeMode? themeMode,
     AppLogLevel? logLevel,
@@ -171,11 +177,22 @@ final class AppSettings {
     cacheLimitGb: cacheLimitGb ?? this.cacheLimitGb,
     idlePauseEnabled: idlePauseEnabled ?? this.idlePauseEnabled,
     idlePauseSeconds: idlePauseSeconds ?? this.idlePauseSeconds,
-    captureFps: captureFps ?? this.captureFps,
+    captureIntervalSeconds:
+        captureIntervalSeconds ?? this.captureIntervalSeconds,
     chunkDurationSeconds: chunkDurationSeconds ?? this.chunkDurationSeconds,
     themeMode: themeMode ?? this.themeMode,
     logLevel: logLevel ?? this.logLevel,
   );
+}
+
+int _captureIntervalSecondsFromJson(Map<String, Object?> json) {
+  if (json.containsKey('captureIntervalSeconds')) {
+    return jsonInt(json, 'captureIntervalSeconds');
+  }
+  if (json.containsKey('captureFps')) {
+    jsonInt(json, 'captureFps');
+  }
+  return 1;
 }
 
 String _apiModelFromJson(Map<String, Object?> json) {

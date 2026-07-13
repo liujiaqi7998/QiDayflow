@@ -11,14 +11,82 @@ struct CaptureLoopDecision {
   bool finalize_chunk = false;
 };
 
+enum class CaptureWorkerAction {
+  kStop,
+  kPause,
+  kFinalizeChunk,
+  kInitializeTopology,
+  kPollSchedule,
+};
+
+CaptureWorkerAction DecideCaptureWorkerAction(bool stop_requested,
+                                              bool manual_paused,
+                                              bool idle_paused,
+                                              bool chunk_has_frames,
+                                              int64_t chunk_elapsed_ms,
+                                              bool topology_available);
+
+bool ShouldWakeCaptureRetryWait(bool stop_requested, bool manual_paused);
+
+bool IsSupportedCaptureIntervalSeconds(uint32_t interval_seconds);
+
+uint32_t CalculateRegularChunkFrameCount(uint32_t interval_seconds,
+                                         uint32_t duration_seconds);
+
+struct CaptureVideoTiming {
+  uint32_t frame_rate_numerator = 1;
+  uint32_t frame_rate_denominator = 1;
+  int64_t frame_duration_ticks = 10'000'000;
+};
+
+CaptureVideoTiming VideoTimingForInterval(uint32_t interval_seconds);
+
+struct MediaSampleTiming {
+  int64_t timestamp_ticks = 0;
+  int64_t duration_ticks = 1;
+  int64_t end_ticks = 1;
+};
+
+MediaSampleTiming CalculateMediaSampleTiming(int64_t sample_offset_ticks,
+                                             int64_t end_offset_ticks);
+
+int64_t MediaFoundationTicksToDurationMs(int64_t duration_ticks);
+
+int64_t CalculateEncodedDurationMs(uint32_t frame_count,
+                                   uint32_t interval_seconds);
+
+struct CaptureScheduleDecision {
+  bool capture_frame = false;
+  bool sample_metadata = false;
+};
+
+class CaptureSchedule {
+ public:
+  explicit CaptureSchedule(uint32_t capture_interval_seconds = 1);
+
+  void Configure(uint32_t capture_interval_seconds);
+  void Reset(int64_t now_ms);
+  CaptureScheduleDecision Poll(int64_t now_ms);
+  void OnFrameCaptured(int64_t now_ms);
+  int64_t DelayUntilNextMs(int64_t now_ms) const;
+
+ private:
+  int64_t frame_interval_ms_ = 1000;
+  int64_t next_frame_ms_ = 0;
+  int64_t next_metadata_ms_ = 0;
+  bool frame_schedule_exhausted_ = false;
+  bool metadata_schedule_exhausted_ = false;
+};
+
 class CaptureChunkProgress {
  public:
-  explicit CaptureChunkProgress(uint32_t regular_frame_count);
+  explicit CaptureChunkProgress(int64_t regular_chunk_duration_ms);
 
-  void Configure(uint32_t regular_frame_count);
+  void Configure(int64_t regular_chunk_duration_ms);
   void Reset();
   uint32_t frame_count() const;
   int64_t latest_frame_offset_ms() const;
+  bool ShouldFinalizeBeforeSample(int64_t elapsed_ms) const;
 
   CaptureLoopDecision OnTopologyChanged() const;
   CaptureLoopDecision OnTopologyCheckUnavailable() const;
@@ -26,7 +94,7 @@ class CaptureChunkProgress {
   CaptureLoopDecision OnFrameWritten(int64_t offset_ms);
 
  private:
-  uint32_t regular_frame_count_ = 1;
+  int64_t regular_chunk_duration_ms_ = 60'000;
   uint32_t frame_count_ = 0;
   int64_t latest_frame_offset_ms_ = 0;
 };

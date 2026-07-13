@@ -2,6 +2,87 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:qi_day_flow/core/domain/domain.dart';
 
 void main() {
+  group('capture interval settings', () {
+    Map<String, Object?> settingsJson({
+      int? captureIntervalSeconds,
+      int? captureFps,
+    }) {
+      final value = <String, Object?>{
+        'apiUrl': 'https://api.openai.com/v1',
+        'apiModel': 'existing-model',
+        'userDataDirectory': r'D:\Qi Day Flow',
+        'cacheLimitGb': 5,
+        'idlePauseEnabled': true,
+        'idlePauseSeconds': 600,
+        'chunkDurationSeconds': 60,
+        'themeMode': 'system',
+      };
+      if (captureIntervalSeconds != null) {
+        value['captureIntervalSeconds'] = captureIntervalSeconds;
+      }
+      if (captureFps != null) value['captureFps'] = captureFps;
+      return value;
+    }
+
+    test('defaults to one second and writes only the new field', () {
+      final settings = AppSettings.defaults(
+        captureDirectory: r'D:\Qi Day Flow\captures',
+      );
+
+      expect(settings.captureIntervalSeconds, 1);
+      expect(settings.toJson()['captureIntervalSeconds'], 1);
+      expect(settings.toJson(), isNot(contains('captureFps')));
+    });
+
+    test('round-trips each supported capture interval', () {
+      for (final interval in const <int>[1, 10, 20, 30]) {
+        final settings = AppSettings.fromJson(
+          settingsJson(captureIntervalSeconds: interval),
+        );
+
+        expect(settings.captureIntervalSeconds, interval);
+        expect(
+          AppSettings.fromJson(settings.toJson()).captureIntervalSeconds,
+          interval,
+        );
+      }
+    });
+
+    test('new field wins while legacy-only settings migrate to one second', () {
+      expect(
+        AppSettings.fromJson(
+          settingsJson(captureIntervalSeconds: 20, captureFps: 9),
+        ).captureIntervalSeconds,
+        20,
+      );
+      expect(
+        AppSettings.fromJson(
+          settingsJson(captureFps: 9),
+        ).captureIntervalSeconds,
+        1,
+      );
+      expect(AppSettings.fromJson(settingsJson()).captureIntervalSeconds, 1);
+    });
+
+    test('copyWith validates the exact supported intervals', () {
+      final settings = AppSettings.defaults(
+        captureDirectory: r'D:\Qi Day Flow\captures',
+      );
+
+      expect(
+        settings.copyWith(captureIntervalSeconds: 30).captureIntervalSeconds,
+        30,
+      );
+      for (final interval in const <int>[0, 2, 9, 11, 31]) {
+        expect(
+          () => settings.copyWith(captureIntervalSeconds: interval),
+          throwsArgumentError,
+          reason: '$interval seconds must be rejected',
+        );
+      }
+    });
+  });
+
   test('legacy captures directory migrates to its parent data directory', () {
     final settings = AppSettings.fromJson(<String, Object?>{
       'apiUrl': 'https://api.openai.com/v1',

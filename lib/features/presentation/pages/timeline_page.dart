@@ -8,6 +8,8 @@ import '../app_theme.dart';
 import '../app_view_model.dart';
 import '../widgets/ui_actions.dart';
 
+enum TimelineSortOrder { newestFirst, oldestFirst }
+
 class TimelinePage extends StatefulWidget {
   const TimelinePage({super.key, required this.viewModel});
 
@@ -20,6 +22,7 @@ class TimelinePage extends StatefulWidget {
 class _TimelinePageState extends State<TimelinePage> {
   late final TextEditingController _searchController;
   String _query = '';
+  TimelineSortOrder _sortOrder = TimelineSortOrder.newestFirst;
 
   @override
   void initState() {
@@ -33,23 +36,35 @@ class _TimelinePageState extends State<TimelinePage> {
     super.dispose();
   }
 
-  List<TimelineCardViewData> _filteredCards(List<TimelineCardViewData> cards) {
+  List<TimelineCardViewData> _visibleCards(List<TimelineCardViewData> cards) {
     final query = _query.trim().toLowerCase();
-    if (query.isEmpty) return cards;
-    return cards
-        .where((card) {
-          return card.title.toLowerCase().contains(query) ||
-              card.summary.toLowerCase().contains(query) ||
-              card.category.toLowerCase().contains(query) ||
-              card.apps.any((app) => app.toLowerCase().contains(query));
-        })
-        .toList(growable: false);
+    final visible = cards.where((card) {
+      return query.isEmpty ||
+          card.title.toLowerCase().contains(query) ||
+          card.summary.toLowerCase().contains(query) ||
+          card.category.toLowerCase().contains(query) ||
+          card.apps.any((app) => app.toLowerCase().contains(query));
+    }).toList();
+    visible.sort((left, right) {
+      final startedAt = left.startedAt.compareTo(right.startedAt);
+      final endedAt = left.endedAt.compareTo(right.endedAt);
+      final id = left.id.compareTo(right.id);
+      final ascending = startedAt != 0
+          ? startedAt
+          : endedAt != 0
+          ? endedAt
+          : id;
+      return _sortOrder == TimelineSortOrder.oldestFirst
+          ? ascending
+          : -ascending;
+    });
+    return visible;
   }
 
   @override
   Widget build(BuildContext context) {
     final allCards = widget.viewModel.timelineCards;
-    final cards = _filteredCards(allCards);
+    final cards = _visibleCards(allCards);
     final total = cards.fold<Duration>(
       Duration.zero,
       (sum, card) => sum + card.duration,
@@ -66,26 +81,19 @@ class _TimelinePageState extends State<TimelinePage> {
             () => widget.viewModel.setTimelineDate(date),
           ),
         ),
-        const SizedBox(height: 14),
-        TextField(
-          key: const ValueKey('timeline-search'),
-          controller: _searchController,
-          onChanged: (value) => setState(() => _query = value),
-          decoration: InputDecoration(
-            hintText: '搜索标题、软件或摘要',
-            prefixIcon: const Icon(Icons.search),
-            suffixIcon: _query.isEmpty
-                ? null
-                : IconButton(
-                    key: const ValueKey('timeline-search-clear'),
-                    tooltip: '清空搜索',
-                    onPressed: () {
-                      _searchController.clear();
-                      setState(() => _query = '');
-                    },
-                    icon: const Icon(Icons.close),
-                  ),
-          ),
+        const SizedBox(height: 12),
+        _CategoryDistribution(cards: allCards),
+        const SizedBox(height: 12),
+        _TimelineToolbar(
+          searchController: _searchController,
+          query: _query,
+          sortOrder: _sortOrder,
+          onQueryChanged: (value) => setState(() => _query = value),
+          onClearQuery: () {
+            _searchController.clear();
+            setState(() => _query = '');
+          },
+          onSortOrderChanged: (value) => setState(() => _sortOrder = value),
         ),
         if (widget.viewModel.failedChunkCount > 0)
           _FailureBanner(
@@ -113,6 +121,360 @@ class _TimelinePageState extends State<TimelinePage> {
       ],
     );
   }
+}
+
+class _TimelineToolbar extends StatelessWidget {
+  const _TimelineToolbar({
+    required this.searchController,
+    required this.query,
+    required this.sortOrder,
+    required this.onQueryChanged,
+    required this.onClearQuery,
+    required this.onSortOrderChanged,
+  });
+
+  final TextEditingController searchController;
+  final String query;
+  final TimelineSortOrder sortOrder;
+  final ValueChanged<String> onQueryChanged;
+  final VoidCallback onClearQuery;
+  final ValueChanged<TimelineSortOrder> onSortOrderChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final search = TextField(
+      key: const ValueKey('timeline-search'),
+      controller: searchController,
+      onChanged: onQueryChanged,
+      decoration: InputDecoration(
+        hintText: '搜索标题、软件或摘要',
+        prefixIcon: const Icon(Icons.search),
+        suffixIcon: query.isEmpty
+            ? null
+            : IconButton(
+                key: const ValueKey('timeline-search-clear'),
+                tooltip: '清空搜索',
+                onPressed: onClearQuery,
+                icon: const Icon(Icons.close),
+              ),
+      ),
+    );
+    final sort = _TimelineSortMenu(
+      value: sortOrder,
+      onChanged: onSortOrderChanged,
+    );
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth >= 640) {
+          return Row(
+            children: [
+              Expanded(child: search),
+              const SizedBox(width: 12),
+              sort,
+            ],
+          );
+        }
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            search,
+            const SizedBox(height: 8),
+            Align(alignment: Alignment.centerRight, child: sort),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _TimelineSortMenu extends StatefulWidget {
+  const _TimelineSortMenu({required this.value, required this.onChanged});
+
+  final TimelineSortOrder value;
+  final ValueChanged<TimelineSortOrder> onChanged;
+
+  @override
+  State<_TimelineSortMenu> createState() => _TimelineSortMenuState();
+}
+
+class _TimelineSortMenuState extends State<_TimelineSortMenu> {
+  final GlobalKey<PopupMenuButtonState<TimelineSortOrder>> _menuKey =
+      GlobalKey<PopupMenuButtonState<TimelineSortOrder>>();
+
+  @override
+  Widget build(BuildContext context) {
+    final label = switch (widget.value) {
+      TimelineSortOrder.newestFirst => '最新优先',
+      TimelineSortOrder.oldestFirst => '最早优先',
+    };
+    return Semantics(
+      key: const ValueKey('timeline-sort'),
+      label: '时间轴排序：$label',
+      button: true,
+      excludeSemantics: true,
+      onTap: () => _menuKey.currentState?.showButtonMenu(),
+      child: KeyedSubtree(
+        key: const ValueKey('timeline-sort-menu'),
+        child: PopupMenuButton<TimelineSortOrder>(
+          key: _menuKey,
+          tooltip: '选择时间轴排序方式',
+          initialValue: widget.value,
+          onSelected: widget.onChanged,
+          itemBuilder: (context) => const [
+            PopupMenuItem(
+              value: TimelineSortOrder.newestFirst,
+              child: Text('最新优先'),
+            ),
+            PopupMenuItem(
+              value: TimelineSortOrder.oldestFirst,
+              child: Text('最早优先'),
+            ),
+          ],
+          child: Container(
+            constraints: const BoxConstraints(minWidth: 132, minHeight: 48),
+            padding: const EdgeInsets.symmetric(horizontal: 14),
+            decoration: BoxDecoration(
+              border: Border.all(color: Theme.of(context).colorScheme.outline),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.sort, size: 20),
+                const SizedBox(width: 8),
+                Text(label),
+                const SizedBox(width: 6),
+                const Icon(Icons.arrow_drop_down, size: 20),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CategoryDistribution extends StatelessWidget {
+  const _CategoryDistribution({required this.cards});
+
+  final List<TimelineCardViewData> cards;
+
+  @override
+  Widget build(BuildContext context) {
+    final categories = _aggregateCategories(cards);
+    final theme = Theme.of(context);
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('当日类别分布', style: theme.textTheme.titleSmall),
+            if (categories.isEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                '这一天还没有可统计的活动',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ] else ...[
+              const SizedBox(height: 10),
+              _CategoryDistributionBar(categories: categories),
+              const SizedBox(height: 10),
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  if (constraints.maxWidth < 640) {
+                    return SingleChildScrollView(
+                      key: const ValueKey('timeline-category-scroll'),
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          for (
+                            var index = 0;
+                            index < categories.length;
+                            index++
+                          )
+                            Padding(
+                              padding: EdgeInsets.only(
+                                right: index == categories.length - 1 ? 0 : 14,
+                              ),
+                              child: _CategoryDistributionItem(
+                                category: categories[index],
+                              ),
+                            ),
+                        ],
+                      ),
+                    );
+                  }
+                  return Wrap(
+                    spacing: 14,
+                    runSpacing: 8,
+                    children: [
+                      for (final category in categories)
+                        _CategoryDistributionItem(category: category),
+                    ],
+                  );
+                },
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  static List<_CategoryDuration> _aggregateCategories(
+    List<TimelineCardViewData> cards,
+  ) {
+    final durations = <String, int>{};
+    for (final card in cards) {
+      final duration = card.duration.inMicroseconds;
+      if (duration <= 0) continue;
+      durations.update(
+        card.category,
+        (current) => current + duration,
+        ifAbsent: () => duration,
+      );
+    }
+    final total = durations.values.fold<int>(0, (sum, value) => sum + value);
+    final categories = durations.entries
+        .map(
+          (entry) => _CategoryDuration(
+            name: entry.key,
+            microseconds: entry.value,
+            totalMicroseconds: total,
+          ),
+        )
+        .toList();
+    categories.sort((left, right) {
+      final duration = right.microseconds.compareTo(left.microseconds);
+      return duration != 0 ? duration : left.name.compareTo(right.name);
+    });
+    return categories;
+  }
+}
+
+class _CategoryDistributionBar extends StatelessWidget {
+  const _CategoryDistributionBar({required this.categories});
+
+  final List<_CategoryDuration> categories;
+
+  @override
+  Widget build(BuildContext context) {
+    final brightness = Theme.of(context).brightness;
+    return ExcludeSemantics(
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(4),
+        child: SizedBox(
+          height: 12,
+          child: Row(
+            children: [
+              for (final category in categories)
+                Expanded(
+                  flex: category.microseconds,
+                  child: ColoredBox(
+                    key: ValueKey('timeline-category-segment-${category.name}'),
+                    color: categoryColor(category.name, brightness),
+                    child: const SizedBox.expand(),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CategoryDistributionItem extends StatefulWidget {
+  _CategoryDistributionItem({required this.category})
+    : super(key: ValueKey('timeline-category-item-${category.name}'));
+
+  final _CategoryDuration category;
+
+  @override
+  State<_CategoryDistributionItem> createState() =>
+      _CategoryDistributionItemState();
+}
+
+class _CategoryDistributionItemState extends State<_CategoryDistributionItem> {
+  final GlobalKey<TooltipState> _tooltipKey = GlobalKey<TooltipState>();
+
+  @override
+  Widget build(BuildContext context) {
+    final category = widget.category;
+    final theme = Theme.of(context);
+    return Focus(
+      onFocusChange: (focused) {
+        if (focused) _tooltipKey.currentState?.ensureTooltipVisible();
+      },
+      child: Tooltip(
+        key: _tooltipKey,
+        message: category.accessibilityLabel,
+        excludeFromSemantics: true,
+        child: Semantics(
+          container: true,
+          focusable: true,
+          label: category.accessibilityLabel,
+          child: ExcludeSemantics(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(
+                minWidth: 48,
+                minHeight: 48,
+                maxWidth: 260,
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ColoredBox(
+                    color: categoryColor(category.name, theme.brightness),
+                    child: const SizedBox.square(dimension: 10),
+                  ),
+                  const SizedBox(width: 6),
+                  Flexible(
+                    child: Text(
+                      category.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    '${formatDuration(category.duration)} · '
+                    '${category.percentageText}',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CategoryDuration {
+  const _CategoryDuration({
+    required this.name,
+    required this.microseconds,
+    required this.totalMicroseconds,
+  });
+
+  final String name;
+  final int microseconds;
+  final int totalMicroseconds;
+
+  Duration get duration => Duration(microseconds: microseconds);
+  double get share => microseconds / totalMicroseconds;
+  String get percentageText => '${(share * 100).round()}%';
+  String get accessibilityLabel =>
+      '$name，${formatDuration(duration)}，占当日 $percentageText';
 }
 
 class _TimelineHeader extends StatelessWidget {

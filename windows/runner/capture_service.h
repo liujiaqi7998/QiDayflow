@@ -28,7 +28,7 @@ struct DisplayInfo {
 struct CaptureConfig {
   std::wstring output_root;
   std::string session_id;
-  double fps = 1.0;
+  uint32_t capture_interval_seconds = 1;
   int32_t chunk_duration_seconds = 60;
   uint32_t max_width = 1920;
   uint32_t max_height = 1080;
@@ -70,6 +70,10 @@ struct ChunkResult {
   uint32_t video_frame_count = 0;
   uint32_t video_width = 0;
   uint32_t video_height = 0;
+  uint32_t capture_interval_seconds = 1;
+  uint32_t video_frame_rate_numerator = 1;
+  uint32_t video_frame_rate_denominator = 1;
+  int64_t video_frame_duration_ticks = 10'000'000;
   int32_t virtual_left = 0;
   int32_t virtual_top = 0;
   int32_t virtual_width = 0;

@@ -1,5 +1,7 @@
 #include "native_bridge.h"
 
+#include "capture_runtime.h"
+
 #include <flutter/event_stream_handler_functions.h>
 #include <flutter/standard_method_codec.h>
 #include <shellapi.h>
@@ -221,18 +223,19 @@ int64_t IntegerValue(const EncodableMap* map,
   return fallback;
 }
 
-double DoubleValue(const EncodableMap* map,
-                   std::initializer_list<const char*> keys,
-                   double fallback) {
-  const EncodableValue* value = FindAny(map, keys);
-  if (value == nullptr) {
-    return fallback;
+std::optional<int64_t> ExactIntegerValue(const EncodableMap* map,
+                                         const char* key) {
+  const EncodableValue* value = Find(map, key);
+  if (value == nullptr || value->IsNull()) {
+    return std::nullopt;
   }
-  if (std::holds_alternative<double>(*value)) {
-    return std::get<double>(*value);
+  if (std::holds_alternative<int32_t>(*value)) {
+    return std::get<int32_t>(*value);
   }
-  const std::optional<int64_t> integer = value->TryGetLongValue();
-  return integer.has_value() ? static_cast<double>(integer.value()) : fallback;
+  if (std::holds_alternative<int64_t>(*value)) {
+    return std::get<int64_t>(*value);
+  }
+  return std::nullopt;
 }
 
 bool BoolValue(const EncodableMap* map,
@@ -416,8 +419,11 @@ EncodableMap ChunkMap(const CaptureEvent& event) {
   Put(&map, "type", EncodableValue("chunkCompleted"));
   Put(&map, "sessionId", EncodableValue(chunk.session_id));
   Put(&map, "chunkId", EncodableValue(chunk.chunk_id));
-  Put(&map, "schemaVersion", EncodableValue(3));
+  Put(&map, "schemaVersion", EncodableValue(4));
   Put(&map, "captureScope", EncodableValue("active-window-display"));
+  Put(&map, "captureIntervalSeconds",
+      EncodableValue(static_cast<int64_t>(
+          chunk.capture_interval_seconds)));
   Put(&map, "directoryPath", EncodableValue(chunk.directory_path));
   Put(&map, "videoPath", EncodableValue(chunk.video_path));
   Put(&map, "metadataPath", EncodableValue(chunk.metadata_path));
@@ -430,6 +436,14 @@ EncodableMap ChunkMap(const CaptureEvent& event) {
       EncodableValue(static_cast<int64_t>(chunk.video_width)));
   Put(&map, "videoHeight",
       EncodableValue(static_cast<int64_t>(chunk.video_height)));
+  Put(&map, "videoFrameRateNumerator",
+      EncodableValue(static_cast<int64_t>(
+          chunk.video_frame_rate_numerator)));
+  Put(&map, "videoFrameRateDenominator",
+      EncodableValue(static_cast<int64_t>(
+          chunk.video_frame_rate_denominator)));
+  Put(&map, "videoFrameDurationTicks",
+      EncodableValue(chunk.video_frame_duration_ticks));
 
   EncodableMap virtual_desktop;
   Put(&virtual_desktop, "left", EncodableValue(chunk.virtual_left));
@@ -1168,8 +1182,19 @@ void NativeBridge::HandleMethodCall(
     if (config.session_id.empty()) {
       config.session_id = NewSessionId();
     }
-    config.fps =
-        std::clamp(DoubleValue(arguments, {"fps"}, 1.0), 0.2, 10.0);
+    const std::optional<int64_t> capture_interval =
+        ExactIntegerValue(arguments, "captureIntervalSeconds");
+    if (!capture_interval.has_value() || *capture_interval < 0 ||
+        *capture_interval > std::numeric_limits<uint32_t>::max() ||
+        !IsSupportedCaptureIntervalSeconds(
+            static_cast<uint32_t>(*capture_interval))) {
+      result->Error(
+          "invalid_capture_spec",
+          "captureIntervalSeconds must be the integer 1, 10, 20, or 30");
+      return;
+    }
+    config.capture_interval_seconds =
+        static_cast<uint32_t>(*capture_interval);
     config.chunk_duration_seconds = Int32Clamped(
         IntegerValue(arguments, {"chunkDurationSeconds"}, 60), 10, 3600);
     config.max_width = static_cast<uint32_t>(Int32Clamped(
@@ -1181,10 +1206,10 @@ void NativeBridge::HandleMethodCall(
     config.idle_timeout_seconds = static_cast<uint32_t>(Int32Clamped(
         IntegerValue(arguments, {"idleTimeoutSeconds"}, 600), 1, 86400));
 
-    if (config.fps != 1.0 || config.chunk_duration_seconds != 60 ||
+    if (config.chunk_duration_seconds != 60 ||
         config.max_width != 1920 || config.max_height != 1080) {
       result->Error("invalid_capture_spec",
-                    "Capture requires 1920x1080, 1 FPS, and 60-second chunks");
+                    "Capture requires 1920x1080 and 60-second chunks");
       return;
     }
 
@@ -1338,6 +1363,59 @@ void NativeBridge::HandleMethodCall(
     } else {
       result->Success(EncodableValue(Utf8FromWide(selected)));
     }
+    return;
+  }
+  if (method == "openDirectoryInExplorer") {
+    const EncodableValue* directory_value = Find(arguments, "directoryPath");
+    if (directory_value == nullptr ||
+        !std::holds_alternative<std::string>(*directory_value)) {
+      result->Error("invalid_arguments",
+                    "directoryPath must be a UTF-8 string");
+      return;
+    }
+    const std::string& utf8_path = std::get<std::string>(*directory_value);
+    const std::wstring wide_path = WideFromUtf8(utf8_path);
+    const std::filesystem::path input(wide_path);
+    if (wide_path.empty()) {
+      result->Error("invalid_directory_path",
+                    "Directory path must be valid non-empty UTF-8");
+      return;
+    }
+    if (!input.is_absolute()) {
+      result->Error("invalid_directory_path",
+                    "Directory path must be absolute");
+      return;
+    }
+    std::error_code path_error;
+    if (!std::filesystem::exists(input, path_error) || path_error) {
+      result->Error("directory_not_found", "Directory path does not exist");
+      return;
+    }
+    const std::filesystem::path canonical_path =
+        std::filesystem::canonical(input, path_error);
+    if (path_error || canonical_path.empty()) {
+      result->Error("directory_canonicalization_failed",
+                    "Directory path could not be canonicalized");
+      return;
+    }
+    if (!std::filesystem::is_directory(canonical_path, path_error) ||
+        path_error) {
+      result->Error("not_a_directory",
+                    "Directory path must identify a directory");
+      return;
+    }
+    const HINSTANCE shell_result =
+        ShellExecuteW(window_, L"open", canonical_path.c_str(), nullptr,
+                      nullptr, SW_SHOWNORMAL);
+    const INT_PTR shell_code = reinterpret_cast<INT_PTR>(shell_result);
+    if (shell_code <= 32) {
+      result->Error("explorer_failed", "Explorer could not open the directory",
+                    EncodableValue(static_cast<int64_t>(shell_code)));
+      return;
+    }
+    EncodableMap response;
+    Put(&response, "opened", EncodableValue(true));
+    result->Success(EncodableValue(std::move(response)));
     return;
   }
   if (method == "getDefaultDataDirectory") {

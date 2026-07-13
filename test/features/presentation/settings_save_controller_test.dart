@@ -35,7 +35,7 @@ void main() {
         cacheLimitGb: 5,
         idlePauseEnabled: true,
         idlePauseSeconds: 600,
-        captureFps: 1,
+        captureIntervalSeconds: 10,
         chunkDurationSeconds: 60,
         themeMode: AppThemeMode.system,
       ),
@@ -96,6 +96,7 @@ void main() {
       jsonDecode(settingsRepository.values['app_settings']!),
     );
     expect(stored.apiModel, 'newest-model');
+    expect(stored.captureIntervalSeconds, 10);
 
     final failed = controller.saveSettings(_draft(controller, 'failed-model'));
     await _waitFor(() => settingsRepository.pendingWrites.length == 3);
@@ -121,6 +122,7 @@ SettingsDraft _draft(AppController controller, String model) => SettingsDraft(
   cacheLimitGb: controller.settings.cacheLimitGb,
   idlePauseEnabled: controller.settings.idlePauseEnabled,
   idleTimeoutMinutes: controller.settings.idleTimeoutMinutes,
+  captureIntervalSeconds: controller.settings.captureIntervalSeconds,
   themeMode: ThemeMode.system,
   logLevel: controller.settings.logLevel,
 );

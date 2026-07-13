@@ -13,6 +13,8 @@ add_executable(${BINARY_NAME} WIN32
   "capture_runtime.h"
   "capture_service.cpp"
   "capture_service.h"
+  "frame_similarity.cpp"
+  "frame_similarity.h"
   "flutter_window.cpp"
   "main.cpp"
   "native_bridge.cpp"
@@ -91,6 +93,16 @@ apply_standard_settings(qi_day_flow_capture_runtime_test)
 target_compile_options(qi_day_flow_capture_runtime_test PRIVATE /FS /utf-8)
 add_test(NAME qi_day_flow_capture_runtime_test
   COMMAND qi_day_flow_capture_runtime_test)
+
+add_executable(qi_day_flow_frame_similarity_test EXCLUDE_FROM_ALL
+  "frame_similarity.cpp"
+  "frame_similarity.h"
+  "frame_similarity_test.cpp"
+)
+apply_standard_settings(qi_day_flow_frame_similarity_test)
+target_compile_options(qi_day_flow_frame_similarity_test PRIVATE /FS /utf-8)
+add_test(NAME qi_day_flow_frame_similarity_test
+  COMMAND qi_day_flow_frame_similarity_test)
 
 add_executable(qi_day_flow_native_frame_logger_test EXCLUDE_FROM_ALL
   "native_frame_logger.cpp"

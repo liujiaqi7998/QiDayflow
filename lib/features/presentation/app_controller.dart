@@ -257,7 +257,7 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
         NativeCaptureConfiguration(
           outputDirectory: _runtimeSettings.captureDirectory,
           sessionId: '${session.id}',
-          fps: captureFramesPerSecond,
+          captureIntervalSeconds: _runtimeSettings.captureIntervalSeconds,
           chunkDurationSeconds: captureChunkDurationSeconds,
           idlePauseEnabled: _runtimeSettings.idlePauseEnabled,
           idleTimeoutSeconds: _runtimeSettings.idlePauseSeconds,
@@ -424,6 +424,12 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
       executablePath,
     );
     if (!revealed) throw StateError('无法在 Explorer 中定位该软件');
+  }
+
+  @override
+  Future<void> openUserDataDirectory(String directoryPath) async {
+    final opened = await _nativeService.openDirectoryInExplorer(directoryPath);
+    if (!opened) throw StateError('无法在 Explorer 中打开用户数据目录');
   }
 
   @override
@@ -1003,6 +1009,7 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
       cacheLimitGb: _runtimeSettings.cacheLimitGb,
       idlePauseEnabled: _runtimeSettings.idlePauseEnabled,
       idleTimeoutMinutes: _runtimeSettings.idlePauseSeconds ~/ 60,
+      captureIntervalSeconds: _runtimeSettings.captureIntervalSeconds,
       themeMode: switch (_runtimeSettings.themeMode) {
         AppThemeMode.system => ThemeMode.system,
         AppThemeMode.light => ThemeMode.light,
@@ -1073,7 +1080,9 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
       idlePauseEnabled: draft.idlePauseEnabled,
       idlePauseSeconds: draft.idleTimeoutMinutes * 60,
       themeMode: _preference(draft.themeMode),
-      captureFps: _runtimeSettings.captureFps,
+      captureIntervalSeconds: recordingStatus.isActive
+          ? _runtimeSettings.captureIntervalSeconds
+          : draft.captureIntervalSeconds,
       chunkDurationSeconds: _runtimeSettings.chunkDurationSeconds,
       logLevel: draft.logLevel,
     );

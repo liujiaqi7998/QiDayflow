@@ -83,6 +83,43 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('daily chart exposes category details without mouse hover', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    final day = DateTime(2026, 7, 10);
+    final viewModel = _StatisticsViewModel(
+      statistics: _statistics(
+        dailyCategoryMinutes: {
+          day: const {'编程': 45, '会议': 15},
+        },
+      ),
+    );
+    await tester.pumpWidget(_host(viewModel));
+
+    final chart = find.byKey(const ValueKey('daily-category-chart'));
+    await tester.ensureVisible(chart);
+    await tester.pumpAndSettle();
+
+    final traversal = tester.semantics.simulatedAccessibilityTraversal();
+    expect(
+      traversal,
+      containsAll(<Matcher>[
+        isSemantics(label: '2026年7月10日，编程，45 分钟，当日 75%'),
+        isSemantics(label: '2026年7月10日，会议，15 分钟，当日 25%'),
+      ]),
+    );
+
+    final box = tester.getRect(chart);
+    await tester.tapAt(Offset(box.center.dx + 16, box.center.dy));
+    await tester.pump();
+    expect(
+      find.byKey(const ValueKey('daily-category-tooltip')),
+      findsOneWidget,
+    );
+    semantics.dispose();
+  });
+
   testWidgets('application ranking shows decoded icons and stable fallbacks', (
     tester,
   ) async {

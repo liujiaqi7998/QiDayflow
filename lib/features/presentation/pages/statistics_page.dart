@@ -2,6 +2,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 
 import '../../../core/utils/formatters.dart';
 import '../app_theme.dart';
@@ -405,41 +406,48 @@ class _DailyStackedChartState extends State<_DailyStackedChart> {
               );
               return SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
-                child: MouseRegion(
-                  onExit: (_) => _clearHover(),
-                  onHover: (event) => _updateHover(
+                child: Listener(
+                  onPointerDown: (event) => _updateHover(
                     event.localPosition,
                     Size(width, 232),
                     entries,
                   ),
-                  child: SizedBox(
-                    width: width,
-                    height: 232,
-                    child: Stack(
-                      clipBehavior: Clip.none,
-                      children: [
-                        Positioned.fill(
-                          child: CustomPaint(
-                            painter: _DailyStackedPainter(
-                              entries: entries,
-                              categoryColors: colors,
-                              gridColor: Theme.of(
-                                context,
-                              ).colorScheme.outlineVariant,
-                              textColor: Theme.of(
-                                context,
-                              ).colorScheme.onSurfaceVariant,
-                              hovered: _hovered,
+                  child: MouseRegion(
+                    onExit: (_) => _clearHover(),
+                    onHover: (event) => _updateHover(
+                      event.localPosition,
+                      Size(width, 232),
+                      entries,
+                    ),
+                    child: SizedBox(
+                      width: width,
+                      height: 232,
+                      child: Stack(
+                        clipBehavior: Clip.none,
+                        children: [
+                          Positioned.fill(
+                            child: CustomPaint(
+                              painter: _DailyStackedPainter(
+                                entries: entries,
+                                categoryColors: colors,
+                                gridColor: Theme.of(
+                                  context,
+                                ).colorScheme.outlineVariant,
+                                textColor: Theme.of(
+                                  context,
+                                ).colorScheme.onSurfaceVariant,
+                                hovered: _hovered,
+                              ),
                             ),
                           ),
-                        ),
-                        if (_hovered case final hovered?)
-                          _DailyChartTooltip(
-                            segment: hovered,
-                            pointer: _pointer ?? hovered.rect.center,
-                            chartSize: Size(width, 232),
-                          ),
-                      ],
+                          if (_hovered case final hovered?)
+                            _DailyChartTooltip(
+                              segment: hovered,
+                              pointer: _pointer ?? hovered.rect.center,
+                              chartSize: Size(width, 232),
+                            ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -648,6 +656,22 @@ class _DailyStackedPainter extends CustomPainter {
   final Color gridColor;
   final Color textColor;
   final _DailyChartSegment? hovered;
+
+  @override
+  SemanticsBuilderCallback get semanticsBuilder =>
+      (size) => [
+        for (final segment in _dailyChartSegments(entries, size))
+          CustomPainterSemantics(
+            rect: segment.rect,
+            properties: SemanticsProperties(
+              label:
+                  '${segment.day.year}年${segment.day.month}月${segment.day.day}日，'
+                  '${segment.category}，${formatMinutes(segment.minutes)}，'
+                  '当日 ${(segment.share * 100).toStringAsFixed(0)}%',
+              textDirection: TextDirection.ltr,
+            ),
+          ),
+      ];
 
   @override
   void paint(Canvas canvas, Size size) {

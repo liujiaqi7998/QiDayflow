@@ -34,17 +34,23 @@ final class NativeCaptureConfiguration {
   const NativeCaptureConfiguration({
     required this.outputDirectory,
     required this.sessionId,
-    this.fps = captureFramesPerSecond,
+    this.captureIntervalSeconds = 1,
     this.chunkDurationSeconds = captureChunkDurationSeconds,
     this.maxWidth = captureVideoWidth,
     this.maxHeight = captureVideoHeight,
     this.idlePauseEnabled = true,
     this.idleTimeoutSeconds = 600,
-  });
+  }) : assert(
+         captureIntervalSeconds == 1 ||
+             captureIntervalSeconds == 10 ||
+             captureIntervalSeconds == 20 ||
+             captureIntervalSeconds == 30,
+         'captureIntervalSeconds must be one of 1, 10, 20, or 30',
+       );
 
   final String outputDirectory;
   final String sessionId;
-  final int fps;
+  final int captureIntervalSeconds;
   final int chunkDurationSeconds;
   final int maxWidth;
   final int maxHeight;
@@ -54,7 +60,7 @@ final class NativeCaptureConfiguration {
   Map<String, Object> toMap() => <String, Object>{
     'outputDirectory': outputDirectory,
     'sessionId': sessionId,
-    'fps': fps,
+    'captureIntervalSeconds': captureIntervalSeconds,
     'chunkDurationSeconds': chunkDurationSeconds,
     'maxWidth': maxWidth,
     'maxHeight': maxHeight,
@@ -215,13 +221,17 @@ final class NativeChunkCompletedEvent extends NativeCaptureEvent {
     required this.frameCount,
     required this.videoWidth,
     required this.videoHeight,
+    required this.captureIntervalSeconds,
+    required this.videoFrameRateNumerator,
+    required this.videoFrameRateDenominator,
+    required this.videoFrameDurationTicks,
     required this.windowRecords,
   });
 
   factory NativeChunkCompletedEvent.fromMap(Map<Object?, Object?> map) {
     final schemaVersion = _requiredInt(map, const <String>['schemaVersion']);
-    if (schemaVersion != 3) {
-      throw const FormatException('原生切片元数据版本必须是 schema 3');
+    if (schemaVersion != 3 && schemaVersion != 4) {
+      throw const FormatException('原生切片元数据版本必须是 schema 3 或 4');
     }
     final captureScope = _requiredString(map, const <String>['captureScope']);
     if (captureScope != activeWindowDisplayCaptureScope) {
@@ -263,6 +273,68 @@ final class NativeChunkCompletedEvent extends NativeCaptureEvent {
     if (videoWidth != captureVideoWidth || videoHeight != captureVideoHeight) {
       throw const FormatException('原生切片视频必须是 1920x1080');
     }
+    final captureIntervalSeconds = schemaVersion == 3
+        ? 1
+        : _positiveInt(
+            map['captureIntervalSeconds'],
+            field: 'captureIntervalSeconds',
+          );
+    final videoFrameRateNumerator = schemaVersion == 3
+        ? 1
+        : _positiveInt(
+            map['videoFrameRateNumerator'],
+            field: 'videoFrameRateNumerator',
+          );
+    final videoFrameRateDenominator = schemaVersion == 3
+        ? 1
+        : _positiveInt(
+            map['videoFrameRateDenominator'],
+            field: 'videoFrameRateDenominator',
+          );
+    final videoFrameDurationTicks = schemaVersion == 3
+        ? 10000000
+        : _positiveInt(
+            map['videoFrameDurationTicks'],
+            field: 'videoFrameDurationTicks',
+          );
+    if (schemaVersion == 4 &&
+        (captureIntervalSeconds != 1 &&
+                captureIntervalSeconds != 10 &&
+                captureIntervalSeconds != 20 &&
+                captureIntervalSeconds != 30 ||
+            videoFrameRateNumerator != 1 ||
+            videoFrameRateDenominator != captureIntervalSeconds ||
+            videoFrameDurationTicks != captureIntervalSeconds * 10000000)) {
+      throw const FormatException('schema 4 原生切片视频时序无效');
+    }
+    final startedAtMs = _timeMillis(
+      _value(map, const <String>['startTimeMs', 'startedAtMs', 'startTime']),
+      field: 'startTime',
+    );
+    final endedAtMs = _timeMillis(
+      _value(map, const <String>['endTimeMs', 'endedAtMs', 'endTime']),
+      field: 'endTime',
+    );
+    final durationMs = endedAtMs - startedAtMs;
+    final declaredDurationMs = _optionalInt(map['durationMs']);
+    if (endedAtMs <= startedAtMs || durationMs > 60000) {
+      throw const FormatException('原生切片时长必须在 1 到 60000 毫秒之间');
+    }
+    if ((schemaVersion == 4 && declaredDurationMs == null) ||
+        (map.containsKey('durationMs') && declaredDurationMs == null) ||
+        (declaredDurationMs != null && declaredDurationMs != durationMs)) {
+      throw const FormatException('原生切片 durationMs 与时间范围不一致');
+    }
+    final frameCount = _positiveInt(
+      _value(map, const <String>['frameCount']) ?? counts['capturedFrames'],
+      field: 'frameCount',
+    );
+    final maximumFrameCount =
+        (durationMs + captureIntervalSeconds * 1000 - 1) ~/
+        (captureIntervalSeconds * 1000);
+    if (frameCount > maximumFrameCount) {
+      throw const FormatException('原生切片帧数超出实际时长允许的上限');
+    }
     return NativeChunkCompletedEvent(
       schemaVersion: schemaVersion,
       sessionId: _requiredString(map, const <String>[
@@ -274,20 +346,15 @@ final class NativeChunkCompletedEvent extends NativeCaptureEvent {
       directoryPath: directoryPath,
       videoPath: videoPath,
       metadataPath: metadataPath,
-      startedAtMs: _timeMillis(
-        _value(map, const <String>['startTimeMs', 'startedAtMs', 'startTime']),
-        field: 'startTime',
-      ),
-      endedAtMs: _timeMillis(
-        _value(map, const <String>['endTimeMs', 'endedAtMs', 'endTime']),
-        field: 'endTime',
-      ),
-      frameCount: _positiveInt(
-        _value(map, const <String>['frameCount']) ?? counts['capturedFrames'],
-        field: 'frameCount',
-      ),
+      startedAtMs: startedAtMs,
+      endedAtMs: endedAtMs,
+      frameCount: frameCount,
       videoWidth: videoWidth,
       videoHeight: videoHeight,
+      captureIntervalSeconds: captureIntervalSeconds,
+      videoFrameRateNumerator: videoFrameRateNumerator,
+      videoFrameRateDenominator: videoFrameRateDenominator,
+      videoFrameDurationTicks: videoFrameDurationTicks,
       windowRecords: List<NativeWindowRecord>.unmodifiable(records),
     );
   }
@@ -304,6 +371,10 @@ final class NativeChunkCompletedEvent extends NativeCaptureEvent {
   final int frameCount;
   final int videoWidth;
   final int videoHeight;
+  final int captureIntervalSeconds;
+  final int videoFrameRateNumerator;
+  final int videoFrameRateDenominator;
+  final int videoFrameDurationTicks;
   final List<NativeWindowRecord> windowRecords;
 }
 
@@ -540,6 +611,17 @@ class NativeCaptureService {
     throw const FormatException('Explorer 返回值格式无效');
   }
 
+  Future<bool> openDirectoryInExplorer(String directoryPath) async {
+    final path = _validateWindowsDirectoryPath(directoryPath);
+    final value = await _methods.invokeMethod<Object?>(
+      'openDirectoryInExplorer',
+      <String, Object>{'directoryPath': path},
+    );
+    if (value is bool) return value;
+    if (value is Map) return _asMap(value)['opened'] == true;
+    throw const FormatException('Explorer 返回值格式无效');
+  }
+
   Future<List<NativeExtractedVideoFrame>> extractVideoFrames({
     required String videoPath,
     required String captureRoot,
@@ -652,6 +734,14 @@ String _validateExecutablePath(String value) {
       !p.isAbsolute(path) ||
       !const <String>{'.exe', '.com'}.contains(extension)) {
     throw ArgumentError.value(value, 'executablePath', '必须是绝对可执行文件路径');
+  }
+  return path;
+}
+
+String _validateWindowsDirectoryPath(String value) {
+  final path = p.windows.normalize(value.trim());
+  if (path.isEmpty || path.contains('\u0000') || !p.windows.isAbsolute(path)) {
+    throw ArgumentError.value(value, 'directoryPath', '必须是 Windows 绝对目录路径');
   }
   return path;
 }

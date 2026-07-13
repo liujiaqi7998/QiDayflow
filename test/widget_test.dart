@@ -1,11 +1,15 @@
 import 'dart:async';
 import 'dart:typed_data';
+import 'dart:ui' show SemanticsAction, SemanticsActionEvent;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:qi_day_flow/app.dart';
 import 'package:qi_day_flow/core/domain/domain.dart';
+import 'package:qi_day_flow/features/presentation/app_theme.dart';
 import 'package:qi_day_flow/features/presentation/app_view_model.dart';
+import 'package:qi_day_flow/features/presentation/pages/settings_page.dart';
 
 void main() {
   testWidgets('renders and navigates the real application shell', (
@@ -281,6 +285,190 @@ void main() {
   });
 
   testWidgets(
+    'capture interval is locked while recording and editable after stopping',
+    (WidgetTester tester) async {
+      await tester.binding.setSurfaceSize(const Size(1280, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final semantics = tester.ensureSemantics();
+      final viewModel = _TestViewModel()
+        ..section = AppSection.settings
+        ..recordingStatus = RecordingViewStatus.recording;
+
+      await tester.pumpWidget(QiDayFlowApp(viewModel: viewModel));
+      await tester.pumpAndSettle();
+
+      final interval = find.byKey(const ValueKey('settings-capture-interval'));
+      expect(tester.getSemantics(interval).label, '截图间隔，当前 10 秒。录制正在进行，设置已锁定');
+      expect(find.text('录制期间截图间隔已锁定，停止录制后可更改。'), findsOneWidget);
+      expect(
+        tester
+            .widget<SegmentedButton<int>>(
+              find.descendant(
+                of: interval,
+                matching: find.byType(SegmentedButton<int>),
+              ),
+            )
+            .onSelectionChanged,
+        isNull,
+      );
+
+      await tester.tap(find.text('20 秒'));
+      await tester.pump();
+      expect(viewModel.savedSettings, isEmpty);
+
+      viewModel.recordingStatus = RecordingViewStatus.stopped;
+      viewModel.notifyListeners();
+      await tester.pump();
+
+      expect(
+        tester
+            .widget<SegmentedButton<int>>(
+              find.descendant(
+                of: interval,
+                matching: find.byType(SegmentedButton<int>),
+              ),
+            )
+            .onSelectionChanged,
+        isNotNull,
+      );
+      await tester.tap(find.text('20 秒'));
+      await tester.pumpAndSettle();
+      expect(viewModel.savedSettings, hasLength(1));
+      expect(viewModel.savedSettings.single.captureIntervalSeconds, 20);
+      semantics.dispose();
+    },
+  );
+
+  for (final status in <RecordingViewStatus>[
+    RecordingViewStatus.starting,
+    RecordingViewStatus.recording,
+    RecordingViewStatus.paused,
+    RecordingViewStatus.stopping,
+  ]) {
+    testWidgets('capture interval is disabled while status is ${status.name}', (
+      WidgetTester tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(1280, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final viewModel = _TestViewModel()
+        ..section = AppSection.settings
+        ..recordingStatus = status;
+
+      await tester.pumpWidget(QiDayFlowApp(viewModel: viewModel));
+      await tester.pump();
+
+      final interval = find.byKey(const ValueKey('settings-capture-interval'));
+      final selector = tester.widget<SegmentedButton<int>>(
+        find.descendant(
+          of: interval,
+          matching: find.byType(SegmentedButton<int>),
+        ),
+      );
+      expect(selector.onSelectionChanged, isNull);
+    });
+  }
+
+  for (final status in <RecordingViewStatus>[
+    RecordingViewStatus.stopped,
+    RecordingViewStatus.error,
+  ]) {
+    testWidgets('capture interval is enabled while status is ${status.name}', (
+      WidgetTester tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(1280, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final viewModel = _TestViewModel()
+        ..section = AppSection.settings
+        ..recordingStatus = status;
+
+      await tester.pumpWidget(QiDayFlowApp(viewModel: viewModel));
+      await tester.pump();
+
+      final interval = find.byKey(const ValueKey('settings-capture-interval'));
+      final selector = tester.widget<SegmentedButton<int>>(
+        find.descendant(
+          of: interval,
+          matching: find.byType(SegmentedButton<int>),
+        ),
+      );
+      expect(selector.onSelectionChanged, isNotNull);
+    });
+  }
+
+  testWidgets('narrow capture interval dropdown is disabled while recording', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(400, 720));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final viewModel = _TestViewModel()
+      ..section = AppSection.settings
+      ..recordingStatus = RecordingViewStatus.paused;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: SettingsPage(viewModel: viewModel)),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final interval = find.byKey(const ValueKey('settings-capture-interval'));
+    final dropdown = tester.widget<DropdownButtonFormField<int>>(
+      find.descendant(
+        of: interval,
+        matching: find.byType(DropdownButtonFormField<int>),
+      ),
+    );
+    expect(dropdown.onChanged, isNull);
+    expect(find.text('录制期间截图间隔已锁定，停止录制后可更改。'), findsOneWidget);
+    expect(viewModel.savedSettings, isEmpty);
+  });
+
+  testWidgets('user data directory can be opened while recording', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final viewModel = _TestViewModel()
+      ..section = AppSection.settings
+      ..recordingStatus = RecordingViewStatus.recording;
+
+    await tester.pumpWidget(QiDayFlowApp(viewModel: viewModel));
+    await tester.pumpAndSettle();
+
+    final openButton = find.byKey(
+      const ValueKey('settings-open-user-data-directory'),
+    );
+    expect(openButton, findsOneWidget);
+    expect(find.byTooltip('在资源管理器中打开用户数据目录'), findsOneWidget);
+    expect(tester.widget<IconButton>(openButton).onPressed, isNotNull);
+
+    await tester.tap(openButton);
+    await tester.pumpAndSettle();
+    expect(viewModel.openedUserDataDirectories, <String>[r'C:\QiDayFlow']);
+  });
+
+  testWidgets('user data directory open failure shows a closable snackbar', (
+    WidgetTester tester,
+  ) async {
+    final viewModel = _TestViewModel()
+      ..section = AppSection.settings
+      ..openUserDataDirectoryError = StateError('Explorer unavailable');
+
+    await tester.pumpWidget(QiDayFlowApp(viewModel: viewModel));
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const ValueKey('settings-open-user-data-directory')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('打开用户数据目录失败'), findsOneWidget);
+    expect(
+      tester.widget<SnackBar>(find.byType(SnackBar)).showCloseIcon,
+      isTrue,
+    );
+  });
+
+  testWidgets(
     'clear cached videos confirms, cancels safely, and works when narrow',
     (WidgetTester tester) async {
       await tester.binding.setSurfaceSize(const Size(480, 720));
@@ -484,6 +672,48 @@ void main() {
   });
 
   testWidgets(
+    'capture interval selector is accessible and saves exact values',
+    (WidgetTester tester) async {
+      await tester.binding.setSurfaceSize(const Size(1280, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final semantics = tester.ensureSemantics();
+      try {
+        final viewModel = _TestViewModel()..section = AppSection.settings;
+        await tester.pumpWidget(QiDayFlowApp(viewModel: viewModel));
+        await tester.pumpAndSettle();
+
+        final selector = find.byKey(
+          const ValueKey('settings-capture-interval'),
+        );
+        expect(selector, findsOneWidget);
+        expect(tester.getSemantics(selector).label, '截图间隔，当前 10 秒');
+        for (final interval in const <int>[1, 10, 20, 30]) {
+          expect(
+            find.descendant(of: selector, matching: find.text('$interval 秒')),
+            findsOneWidget,
+          );
+        }
+        expect(
+          find.text('频率越低，本地视频体积、CPU 和 AI 候选图片越少，但短暂活动可能不被图像捕获。'),
+          findsOneWidget,
+        );
+        expect(find.text('更改将在下次开始录制时生效。'), findsOneWidget);
+
+        await tester.tap(
+          find.descendant(of: selector, matching: find.text('30 秒')),
+        );
+        await tester.pumpAndSettle();
+
+        expect(viewModel.savedSettings, hasLength(1));
+        expect(viewModel.savedSettings.single.captureIntervalSeconds, 30);
+        expect(tester.getSemantics(selector).label, '截图间隔，当前 30 秒');
+      } finally {
+        semantics.dispose();
+      }
+    },
+  );
+
+  testWidgets(
     'timeline search filters content and keeps the query across dates',
     (WidgetTester tester) async {
       await tester.binding.setSurfaceSize(const Size(1280, 800));
@@ -542,6 +772,462 @@ void main() {
       await tester.pump();
       expect(find.text('实现统计服务'), findsOneWidget);
       expect(find.text('阅读文档'), findsOneWidget);
+    },
+  );
+
+  testWidgets('timeline sorts deterministically and keeps the selected order', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final sharedStart = DateTime.utc(2026, 7, 10, 10);
+    final viewModel = _TestViewModel()
+      ..timelineCards = [
+        _viewCard(
+          id: 'a',
+          title: '相同结束 A',
+          summary: '',
+          category: '工作',
+          app: 'Editor',
+          duration: const Duration(hours: 1),
+          startedAt: sharedStart,
+        ),
+        _viewCard(
+          id: 'old',
+          title: '较早活动',
+          summary: '',
+          category: '工作',
+          app: 'Editor',
+          duration: const Duration(minutes: 20),
+          startedAt: sharedStart.subtract(const Duration(hours: 1)),
+        ),
+        _viewCard(
+          id: 'c',
+          title: '较晚结束 C',
+          summary: '',
+          category: '工作',
+          app: 'Editor',
+          duration: const Duration(hours: 2),
+          startedAt: sharedStart,
+        ),
+        _viewCard(
+          id: 'b',
+          title: '相同结束 B',
+          summary: '',
+          category: '工作',
+          app: 'Editor',
+          duration: const Duration(hours: 1),
+          startedAt: sharedStart,
+        ),
+      ];
+
+    await tester.pumpWidget(QiDayFlowApp(viewModel: viewModel));
+
+    List<String> visibleCardIds() => find
+        .byWidgetPredicate(
+          (widget) =>
+              widget.key is ValueKey<String> &&
+              (widget.key! as ValueKey<String>).value.startsWith(
+                'timeline-card-',
+              ),
+        )
+        .evaluate()
+        .map(
+          (element) => ((element.widget.key! as ValueKey<String>).value)
+              .replaceFirst('timeline-card-', ''),
+        )
+        .toList();
+
+    expect(visibleCardIds(), ['c', 'b', 'a', 'old']);
+    expect(find.text('最新优先'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('timeline-sort-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('最早优先').last);
+    await tester.pumpAndSettle();
+    expect(visibleCardIds(), ['old', 'a', 'b', 'c']);
+
+    await tester.enterText(
+      find.byKey(const ValueKey('timeline-search')),
+      '相同结束',
+    );
+    await tester.pump();
+    expect(visibleCardIds(), ['a', 'b']);
+
+    await tester.tap(find.byTooltip('前一天'));
+    await tester.pump();
+    expect(find.text('最早优先'), findsOneWidget);
+    expect(visibleCardIds(), ['a', 'b']);
+
+    viewModel.timelineCards = [
+      ...viewModel.timelineCards,
+      _viewCard(
+        id: 'aa',
+        title: '相同结束 AA',
+        summary: '',
+        category: '工作',
+        app: 'Editor',
+        duration: const Duration(hours: 1),
+        startedAt: sharedStart,
+      ),
+    ];
+    viewModel.notifyListeners();
+    await tester.pump();
+    expect(visibleCardIds(), ['a', 'aa', 'b']);
+    expect(find.text('最早优先'), findsOneWidget);
+  });
+
+  testWidgets('timeline sort is one tappable semantic control', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final semantics = tester.ensureSemantics();
+    try {
+      await tester.pumpWidget(QiDayFlowApp(viewModel: _TestViewModel()));
+
+      final sort = find.byKey(const ValueKey('timeline-sort'));
+      final traversal = tester.semantics.simulatedAccessibilityTraversal();
+      expect(
+        traversal.where((node) => node.label == '时间轴排序：最新优先'),
+        hasLength(1),
+      );
+      expect(traversal.where((node) => node.label == '最新优先'), isEmpty);
+
+      final sortNode = tester.getSemantics(sort);
+      expect(sortNode.label, '时间轴排序：最新优先');
+      expect(
+        sortNode.getSemanticsData().hasAction(SemanticsAction.tap),
+        isTrue,
+      );
+
+      tester.binding.performSemanticsAction(
+        SemanticsActionEvent(
+          type: SemanticsAction.tap,
+          viewId: tester.view.viewId,
+          nodeId: sortNode.id,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('最早优先'), findsOneWidget);
+
+      await tester.tap(find.text('最早优先'));
+      await tester.pumpAndSettle();
+      final updatedTraversal = tester.semantics
+          .simulatedAccessibilityTraversal();
+      expect(
+        updatedTraversal.where((node) => node.label == '时间轴排序：最早优先'),
+        hasLength(1),
+      );
+      expect(
+        tester
+            .getSemantics(sort)
+            .getSemanticsData()
+            .hasAction(SemanticsAction.tap),
+        isTrue,
+      );
+    } finally {
+      semantics.dispose();
+    }
+  });
+
+  testWidgets('timeline traversal announces each category exactly once', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final semantics = tester.ensureSemantics();
+    try {
+      final viewModel = _TestViewModel()
+        ..timelineCards = [
+          _viewCard(
+            id: 'code',
+            title: '实现功能',
+            summary: '',
+            category: '编程',
+            app: 'Editor',
+            duration: const Duration(hours: 1),
+          ),
+          _viewCard(
+            id: 'meeting',
+            title: '同步进度',
+            summary: '',
+            category: '会议',
+            app: 'Meeting',
+            duration: const Duration(minutes: 30),
+          ),
+        ];
+
+      await tester.pumpWidget(QiDayFlowApp(viewModel: viewModel));
+
+      final traversal = tester.semantics.simulatedAccessibilityTraversal();
+      for (final label in const ['编程，1 小时，占当日 67%', '会议，30 分钟，占当日 33%']) {
+        expect(traversal.where((node) => node.label == label), hasLength(1));
+      }
+    } finally {
+      semantics.dispose();
+    }
+  });
+
+  testWidgets('timeline category legend is touch and keyboard accessible', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final viewModel = _TestViewModel()
+      ..timelineCards = [
+        _viewCard(
+          id: 'code',
+          title: '实现功能',
+          summary: '',
+          category: '编程',
+          app: 'Editor',
+          duration: const Duration(hours: 1),
+        ),
+      ];
+    await tester.pumpWidget(QiDayFlowApp(viewModel: viewModel));
+
+    final item = find.byKey(const ValueKey('timeline-category-item-编程'));
+    expect(tester.getSize(item).width, greaterThanOrEqualTo(48));
+    expect(tester.getSize(item).height, greaterThanOrEqualTo(48));
+
+    const tooltipLabel = '编程，1 小时，占当日 100%';
+    for (
+      var tabs = 0;
+      tabs < 20 && find.text(tooltipLabel).evaluate().isEmpty;
+      tabs++
+    ) {
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pump();
+    }
+    expect(find.text(tooltipLabel), findsOneWidget);
+
+    Tooltip.dismissAllToolTips();
+    FocusManager.instance.primaryFocus?.unfocus();
+    await tester.pumpAndSettle();
+    await tester.longPress(item);
+    await tester.pump();
+    expect(find.text(tooltipLabel), findsOneWidget);
+  });
+
+  testWidgets(
+    'timeline category distribution aggregates all cards and retains colors',
+    (WidgetTester tester) async {
+      await tester.binding.setSurfaceSize(const Size(1280, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final viewModel = _TestViewModel()
+        ..timelineCards = [
+          _viewCard(
+            id: 'code-1',
+            title: '实现功能',
+            summary: '',
+            category: '编程',
+            app: 'Editor',
+            duration: const Duration(hours: 1),
+          ),
+          _viewCard(
+            id: 'study',
+            title: '阅读资料',
+            summary: '',
+            category: '学习',
+            app: 'Browser',
+            duration: const Duration(minutes: 30),
+          ),
+          _viewCard(
+            id: 'code-2',
+            title: '修复问题',
+            summary: '',
+            category: '编程',
+            app: 'Editor',
+            duration: const Duration(minutes: 30),
+          ),
+          _viewCard(
+            id: 'meeting',
+            title: '同步进度',
+            summary: '',
+            category: '会议',
+            app: 'Meeting',
+            duration: const Duration(minutes: 30),
+          ),
+          _viewCard(
+            id: 'zero',
+            title: '零时长',
+            summary: '',
+            category: '工作',
+            app: 'Editor',
+            duration: Duration.zero,
+          ),
+        ];
+
+      await tester.pumpWidget(QiDayFlowApp(viewModel: viewModel));
+
+      expect(find.text('当日类别分布'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('timeline-category-item-编程')),
+        findsOneWidget,
+      );
+      expect(find.text('1 小时 30 分钟 · 60%'), findsOneWidget);
+      expect(find.text('30 分钟 · 20%'), findsNWidgets(2));
+      final categoryItemKeys = find
+          .byWidgetPredicate(
+            (widget) =>
+                widget.key is ValueKey<String> &&
+                (widget.key! as ValueKey<String>).value.startsWith(
+                  'timeline-category-item-',
+                ),
+          )
+          .evaluate()
+          .map((element) => (element.widget.key! as ValueKey<String>).value)
+          .toList();
+      expect(categoryItemKeys, [
+        'timeline-category-item-编程',
+        'timeline-category-item-会议',
+        'timeline-category-item-学习',
+      ]);
+      expect(
+        find.byKey(const ValueKey('timeline-category-item-工作')),
+        findsNothing,
+      );
+      expect(
+        tester
+            .widget<ColoredBox>(
+              find.byKey(const ValueKey('timeline-category-segment-编程')),
+            )
+            .color,
+        categoryColor('编程', Brightness.light),
+      );
+
+      await tester.enterText(
+        find.byKey(const ValueKey('timeline-search')),
+        '阅读资料',
+      );
+      await tester.pump();
+      expect(find.text('实现功能'), findsNothing);
+      expect(find.text('1 小时 30 分钟 · 60%'), findsOneWidget);
+      expect(find.text('30 分钟 · 20%'), findsNWidgets(2));
+    },
+  );
+
+  testWidgets('timeline distribution excludes zero and negative durations', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final start = DateTime.utc(2026, 7, 10, 8);
+    final viewModel = _TestViewModel()
+      ..timelineCards = [
+        _viewCard(
+          id: 'zero',
+          title: '零时长',
+          summary: '',
+          category: '工作',
+          app: 'Editor',
+          duration: Duration.zero,
+          startedAt: start,
+        ),
+        _viewCard(
+          id: 'negative',
+          title: '负时长',
+          summary: '',
+          category: '学习',
+          app: 'Editor',
+          duration: const Duration(minutes: -1),
+          startedAt: start,
+        ),
+      ];
+
+    await tester.pumpWidget(QiDayFlowApp(viewModel: viewModel));
+
+    expect(find.text('这一天还没有可统计的活动'), findsOneWidget);
+    expect(find.text('最新优先'), findsOneWidget);
+    expect(find.textContaining('NaN'), findsNothing);
+    expect(find.textContaining('Infinity'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'timeline distribution handles narrow positive data at large text scale',
+    (WidgetTester tester) async {
+      await tester.binding.setSurfaceSize(const Size(600, 700));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      tester.platformDispatcher.textScaleFactorTestValue = 1.5;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      const categories = [
+        '这是一个非常长的类别名称用于验证窄屏布局',
+        '会议',
+        '学习',
+        '设计',
+        '写作',
+        '沟通',
+        '规划',
+      ];
+      final viewModel = _TestViewModel()
+        ..timelineCards = [
+          for (var index = 0; index < categories.length; index++)
+            _viewCard(
+              id: 'category-$index',
+              title: '活动 $index',
+              summary: '',
+              category: categories[index],
+              app: 'Editor',
+              duration: Duration(minutes: index + 1),
+            ),
+        ];
+
+      await tester.pumpWidget(QiDayFlowApp(viewModel: viewModel));
+
+      final legendScroll = find.byKey(
+        const ValueKey('timeline-category-scroll'),
+      );
+      expect(legendScroll, findsOneWidget);
+      final scrollable = find.descendant(
+        of: legendScroll,
+        matching: find.byType(Scrollable),
+      );
+      final scrollPosition = tester.state<ScrollableState>(scrollable).position;
+      expect(scrollPosition.pixels, 0);
+
+      for (final category in categories) {
+        expect(
+          find.byKey(ValueKey('timeline-category-segment-$category')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(ValueKey('timeline-category-item-$category')),
+          findsOneWidget,
+        );
+      }
+
+      final focusOrder = categories.reversed.toList(growable: false);
+      Finder tooltipFor(String category) => find.descendant(
+        of: find.byKey(ValueKey('timeline-category-item-$category')),
+        matching: find.byType(Tooltip),
+      );
+      Focus.of(tester.element(tooltipFor(focusOrder.first))).requestFocus();
+      await tester.pumpAndSettle();
+
+      for (var index = 0; index < focusOrder.length; index++) {
+        final category = focusOrder[index];
+        expect(
+          Focus.of(tester.element(tooltipFor(category))).hasPrimaryFocus,
+          isTrue,
+          reason: '$category should be reachable in keyboard order',
+        );
+        if (index < focusOrder.length - 1) {
+          await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+          await tester.pumpAndSettle();
+        }
+      }
+
+      expect(scrollPosition.pixels, greaterThan(0));
+      final viewportRect = tester.getRect(legendScroll);
+      final finalItemRect = tester.getRect(
+        find.byKey(ValueKey('timeline-category-item-${focusOrder.last}')),
+      );
+      expect(finalItemRect.left, greaterThanOrEqualTo(viewportRect.left));
+      expect(finalItemRect.right, lessThanOrEqualTo(viewportRect.right));
+      expect(find.text('${focusOrder.last}，1 分钟，占当日 4%'), findsOneWidget);
+      expect(tester.takeException(), isNull);
     },
   );
 
@@ -846,8 +1532,9 @@ TimelineCardViewData _viewCard({
   int? averageMemoryCommitBytes,
   int? peakMemoryCommitBytes,
   List<TimelineAppViewData> additionalAppUsages = const <TimelineAppViewData>[],
+  DateTime? startedAt,
 }) {
-  final start = DateTime.utc(2026, 7, 10, 8);
+  final start = startedAt ?? DateTime.utc(2026, 7, 10, 8);
   return TimelineCardViewData(
     id: id,
     category: category,
@@ -927,6 +1614,8 @@ final class _TestViewModel extends ChangeNotifier
   int clearManagedLogCalls = 0;
   final List<AppLogLevel> logLevelUpdates = <AppLogLevel>[];
   final List<String> revealedExecutables = <String>[];
+  final List<String> openedUserDataDirectories = <String>[];
+  Object? openUserDataDirectoryError;
   final List<String> iconRequests = <String>[];
   int analysisQueueRefreshCalls = 0;
   int retryFailedCalls = 0;
@@ -977,6 +1666,7 @@ final class _TestViewModel extends ChangeNotifier
     cacheLimitGb: 5,
     idlePauseEnabled: true,
     idleTimeoutMinutes: 10,
+    captureIntervalSeconds: 10,
     themeMode: ThemeMode.system,
   );
 
@@ -1045,6 +1735,13 @@ final class _TestViewModel extends ChangeNotifier
   @override
   Future<void> revealExecutableInExplorer(String executablePath) async {
     revealedExecutables.add(executablePath);
+  }
+
+  @override
+  Future<void> openUserDataDirectory(String directoryPath) async {
+    openedUserDataDirectories.add(directoryPath);
+    final error = openUserDataDirectoryError;
+    if (error != null) throw error;
   }
 
   @override

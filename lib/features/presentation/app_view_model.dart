@@ -322,6 +322,7 @@ class SettingsDraft {
     required this.cacheLimitGb,
     required this.idlePauseEnabled,
     required this.idleTimeoutMinutes,
+    this.captureIntervalSeconds = 1,
     required this.themeMode,
     this.logLevel = AppLogLevel.info,
     this.apiKeyChanged = true,
@@ -334,6 +335,7 @@ class SettingsDraft {
   final int cacheLimitGb;
   final bool idlePauseEnabled;
   final int idleTimeoutMinutes;
+  final int captureIntervalSeconds;
   final ThemeMode themeMode;
   final AppLogLevel logLevel;
   final bool apiKeyChanged;
@@ -350,6 +352,7 @@ class SettingsViewData {
     required this.cacheLimitGb,
     required this.idlePauseEnabled,
     required this.idleTimeoutMinutes,
+    this.captureIntervalSeconds = 1,
     required this.themeMode,
     this.logLevel = AppLogLevel.info,
   });
@@ -363,6 +366,7 @@ class SettingsViewData {
   final int cacheLimitGb;
   final bool idlePauseEnabled;
   final int idleTimeoutMinutes;
+  final int captureIntervalSeconds;
   final ThemeMode themeMode;
   final AppLogLevel logLevel;
 }
@@ -399,6 +403,7 @@ abstract class QiDayFlowViewModel implements Listenable {
   Future<void> updateTimelineCard(TimelineCardEditDraft draft);
   Future<Uint8List?> loadApplicationIcon(String executablePath);
   Future<void> revealExecutableInExplorer(String executablePath);
+  Future<void> openUserDataDirectory(String directoryPath);
   Future<void> generateDailyReport();
   Future<void> setStatisticsDays(int days);
   Future<void> updateDailyGoalHours(int hours);
