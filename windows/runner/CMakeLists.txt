@@ -74,6 +74,7 @@ target_link_libraries(${BINARY_NAME} PRIVATE
   "uuid.lib"
   "version.lib"
   "windowscodecs.lib"
+  "Wtsapi32.lib"
 )
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 

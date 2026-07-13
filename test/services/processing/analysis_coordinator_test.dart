@@ -362,6 +362,30 @@ void main() {
     },
   );
 
+  test('stop waits for an in-flight retry initialization', () async {
+    final repository = _SchedulingRepository(retryCount: 1);
+    final maxIdGate = repository.maxAnalysisBatchIdGate = Completer<int>();
+    final coordinator = AnalysisCoordinator(
+      captureRepository: repository,
+      analysisRepository: repository,
+      timelineRepository: repository,
+      evidenceReader: const _EmptyEvidenceReader(),
+      serviceFactory: () async => throw StateError('expected test failure'),
+    );
+
+    final retrying = coordinator.retryFailed();
+    await Future<void>.delayed(Duration.zero);
+    var stopCompleted = false;
+    final stopping = coordinator.stop().then((_) => stopCompleted = true);
+    await Future<void>.delayed(Duration.zero);
+    expect(stopCompleted, isFalse);
+
+    maxIdGate.complete(1);
+    await Future.wait(<Future<void>>[retrying, stopping]);
+    expect(stopCompleted, isTrue);
+    expect(repository.retriedBatchIds, isEmpty);
+  });
+
   test('standalone retry backlog cannot starve fresh pending work', () async {
     final repository = _SchedulingRepository(
       retryCount: 0,

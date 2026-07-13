@@ -518,17 +518,21 @@ void main() {
       final row = (await migrated.query('timeline_cards')).single;
       final userVersion = await migrated.rawQuery('PRAGMA user_version');
 
-      expect(AppDatabase.schemaVersion, 8);
-      expect(userVersion.single.values.single, 8);
+      expect(AppDatabase.schemaVersion, 9);
+      expect(userVersion.single.values.single, AppDatabase.schemaVersion);
       expect(row['app_usages_json'], legacyAppUsages);
       expect(row['source_duration_ms'], 1000);
       expect(
         await migrated.query(
           'schema_version',
           where: 'version = ?',
-          whereArgs: <Object>[8],
+          whereArgs: <Object>[AppDatabase.schemaVersion],
         ),
         hasLength(1),
+      );
+      expect(
+        await migrated.rawQuery('PRAGMA table_info(daily_report_jobs)'),
+        isNotEmpty,
       );
     },
   );

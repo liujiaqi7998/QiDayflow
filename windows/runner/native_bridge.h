@@ -39,6 +39,7 @@ class NativeBridge {
   void DrainEvents();
   void NotifyExitRequested();
   void NotifyTrayCommand(TrayCaptureCommand command);
+  void SetSessionLocked(bool locked);
   bool ShutdownAsync(std::function<void()> completion);
   void Shutdown();
 

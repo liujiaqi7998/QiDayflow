@@ -19,6 +19,24 @@ struct CaptureStopPlan {
 
 CaptureStopPlan PlanCaptureStop(bool already_stopped);
 
+enum class InitialSessionLockState { kLocked, kUnlocked, kUnknown };
+
+enum class SessionNotificationCommand { kNone, kLock, kUnlock };
+
+struct SessionNotificationLifecycle {
+  bool keep_window = false;
+  bool unregister_on_destroy = false;
+};
+
+SessionNotificationCommand SessionNotificationCommandForEvent(
+    uint32_t event_code);
+SessionNotificationLifecycle PlanSessionNotificationLifecycle(
+    bool base_created,
+    bool registration_succeeded);
+bool ShouldPauseForInitialSessionState(
+    bool registration_succeeded,
+    InitialSessionLockState state);
+
 struct CaptureLoopDecision {
   bool rebuild_topology = false;
   bool finalize_chunk = false;
@@ -34,12 +52,15 @@ enum class CaptureWorkerAction {
 
 CaptureWorkerAction DecideCaptureWorkerAction(bool stop_requested,
                                               bool manual_paused,
+                                              bool system_paused,
                                               bool idle_paused,
                                               bool chunk_has_frames,
                                               int64_t chunk_elapsed_ms,
                                               bool topology_available);
 
-bool ShouldWakeCaptureRetryWait(bool stop_requested, bool manual_paused);
+bool ShouldWakeCaptureRetryWait(bool stop_requested,
+                                bool manual_paused,
+                                bool system_paused);
 
 bool IsSupportedCaptureIntervalSeconds(uint32_t interval_seconds);
 

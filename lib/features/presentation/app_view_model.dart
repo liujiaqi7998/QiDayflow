@@ -38,6 +38,7 @@ final class UpdateViewData {
 final class AnalysisQueueItemViewData {
   const AnalysisQueueItemViewData({
     required this.chunkId,
+    this.reportDate,
     this.batchId,
     required this.status,
     required this.recordedAt,
@@ -49,7 +50,8 @@ final class AnalysisQueueItemViewData {
     this.errorSummary,
   });
 
-  final int chunkId;
+  final int? chunkId;
+  final String? reportDate;
   final int? batchId;
   final ProcessingStatus status;
   final DateTime recordedAt;
@@ -60,7 +62,8 @@ final class AnalysisQueueItemViewData {
   final DateTime? processingStartedAt;
   final String? errorSummary;
 
-  String get id => 'chunk-$chunkId';
+  bool get isDailyReport => reportDate != null;
+  String get id => isDailyReport ? 'report-$reportDate' : 'chunk-$chunkId';
   Duration get recordingDuration => recordedUntil.difference(recordedAt);
 }
 

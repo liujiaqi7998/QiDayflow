@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/domain/domain.dart';
 import '../../../core/utils/formatters.dart';
 import '../app_view_model.dart';
 import '../widgets/ui_actions.dart';
@@ -12,6 +13,10 @@ class ReportPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final report = viewModel.dailyReport;
+    final failedJob = _failedReportJobForDate(
+      viewModel.analysisQueue,
+      formatIsoDate(viewModel.timelineDate),
+    );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -77,6 +82,23 @@ class ReportPage extends StatelessWidget {
             ),
           ],
         ),
+        if (viewModel.reportLoading) ...[
+          const SizedBox(height: 12),
+          _ReportQueueBanner(
+            message: '已加入分析队列，后台生成中，可安全离开此页面',
+            loading: true,
+            onOpenQueue: () =>
+                viewModel.selectSection(AppSection.analysisQueue),
+          ),
+        ] else if (failedJob != null) ...[
+          const SizedBox(height: 12),
+          _ReportQueueBanner(
+            message: '日报生成失败：${failedJob.errorSummary ?? '可前往分析队列重试'}',
+            loading: false,
+            onOpenQueue: () =>
+                viewModel.selectSection(AppSection.analysisQueue),
+          ),
+        ],
         const SizedBox(height: 18),
         Expanded(
           child: report == null
@@ -89,6 +111,85 @@ class ReportPage extends StatelessWidget {
       ],
     );
   }
+}
+
+class _ReportQueueBanner extends StatelessWidget {
+  const _ReportQueueBanner({
+    required this.message,
+    required this.loading,
+    required this.onOpenQueue,
+  });
+
+  final String message;
+  final bool loading;
+  final VoidCallback onOpenQueue;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    Widget messageRow() => Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (loading)
+          const SizedBox.square(
+            dimension: 18,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          )
+        else
+          Icon(Icons.error_outline, size: 18, color: colors.error),
+        const SizedBox(width: 10),
+        Expanded(child: Text(message)),
+      ],
+    );
+    final openQueue = TextButton.icon(
+      onPressed: onOpenQueue,
+      icon: const Icon(Icons.list_alt, size: 18),
+      label: const Text('去分析队列'),
+    );
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: (loading ? colors.secondaryContainer : colors.errorContainer)
+            .withValues(alpha: loading ? 0.45 : 0.55),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          if (constraints.maxWidth < 360) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                messageRow(),
+                Align(alignment: Alignment.centerRight, child: openQueue),
+              ],
+            );
+          }
+          return Row(
+            children: [
+              Expanded(child: messageRow()),
+              const SizedBox(width: 8),
+              openQueue,
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+AnalysisQueueItemViewData? _failedReportJobForDate(
+  AnalysisQueueViewData queue,
+  String reportDate,
+) {
+  for (final item in queue.items) {
+    if (item.isDailyReport &&
+        item.reportDate == reportDate &&
+        item.status == ProcessingStatus.failed) {
+      return item;
+    }
+  }
+  return null;
 }
 
 bool _isToday(DateTime value) {
@@ -109,20 +210,14 @@ class _EmptyReport extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (loading)
-            const SizedBox.square(
-              dimension: 30,
-              child: CircularProgressIndicator(strokeWidth: 2.5),
-            )
-          else
-            Icon(
-              Icons.description_outlined,
-              size: 46,
-              color: Theme.of(context).colorScheme.outline,
-            ),
+          Icon(
+            loading ? Icons.schedule_outlined : Icons.description_outlined,
+            size: 46,
+            color: Theme.of(context).colorScheme.outline,
+          ),
           const SizedBox(height: 12),
           Text(
-            loading ? '正在生成日报' : '尚未生成日报',
+            loading ? '日报已加入后台队列' : '尚未生成日报',
             style: Theme.of(context).textTheme.titleMedium,
           ),
         ],

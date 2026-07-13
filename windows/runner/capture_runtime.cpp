@@ -56,8 +56,38 @@ CaptureStopPlan PlanCaptureStop(bool already_stopped) {
   return CaptureStopPlan{true, true, false};
 }
 
+SessionNotificationCommand SessionNotificationCommandForEvent(
+    uint32_t event_code) {
+  constexpr uint32_t kSessionLock = 0x7;
+  constexpr uint32_t kSessionUnlock = 0x8;
+  if (event_code == kSessionLock) {
+    return SessionNotificationCommand::kLock;
+  }
+  if (event_code == kSessionUnlock) {
+    return SessionNotificationCommand::kUnlock;
+  }
+  return SessionNotificationCommand::kNone;
+}
+
+SessionNotificationLifecycle PlanSessionNotificationLifecycle(
+    bool base_created,
+    bool registration_succeeded) {
+  if (!base_created) {
+    return {};
+  }
+  return SessionNotificationLifecycle{true, registration_succeeded};
+}
+
+bool ShouldPauseForInitialSessionState(
+    bool registration_succeeded,
+    InitialSessionLockState state) {
+  return !registration_succeeded ||
+      state != InitialSessionLockState::kUnlocked;
+}
+
 CaptureWorkerAction DecideCaptureWorkerAction(bool stop_requested,
                                               bool manual_paused,
+                                              bool system_paused,
                                               bool idle_paused,
                                               bool chunk_has_frames,
                                               int64_t chunk_elapsed_ms,
@@ -65,7 +95,7 @@ CaptureWorkerAction DecideCaptureWorkerAction(bool stop_requested,
   if (stop_requested) {
     return CaptureWorkerAction::kStop;
   }
-  if (manual_paused || idle_paused) {
+  if (manual_paused || system_paused || idle_paused) {
     return CaptureWorkerAction::kPause;
   }
   if (chunk_has_frames && chunk_elapsed_ms >= 60'000) {
@@ -77,8 +107,10 @@ CaptureWorkerAction DecideCaptureWorkerAction(bool stop_requested,
   return CaptureWorkerAction::kPollSchedule;
 }
 
-bool ShouldWakeCaptureRetryWait(bool stop_requested, bool manual_paused) {
-  return stop_requested || manual_paused;
+bool ShouldWakeCaptureRetryWait(bool stop_requested,
+                                bool manual_paused,
+                                bool system_paused) {
+  return stop_requested || manual_paused || system_paused;
 }
 
 bool IsSupportedCaptureIntervalSeconds(uint32_t interval_seconds) {

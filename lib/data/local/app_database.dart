@@ -3,7 +3,7 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 final class AppDatabase {
   AppDatabase({required this.path, this.databaseFactory});
 
-  static const int schemaVersion = 8;
+  static const int schemaVersion = 9;
 
   final String path;
   final DatabaseFactory? databaseFactory;
@@ -99,6 +99,8 @@ final class AppDatabase {
         await _enableAppUsageResourceMetrics(database);
       case 8:
         await _addTimelineSourceDuration(database);
+      case 9:
+        await _createDailyReportJobs(database);
       default:
         throw StateError('Missing database migration for version $version');
     }
@@ -533,5 +535,25 @@ final class AppDatabase {
     if (violations.isNotEmpty) {
       throw StateError('Foreign key violations after schema v8 migration');
     }
+  }
+
+  Future<void> _createDailyReportJobs(DatabaseExecutor database) async {
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS daily_report_jobs (
+        report_date TEXT PRIMARY KEY NOT NULL CHECK(length(report_date) = 10),
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK(status IN ('pending', 'processing', 'failed')),
+        retry_count INTEGER NOT NULL DEFAULT 0 CHECK(retry_count >= 0),
+        error_category TEXT,
+        error_summary TEXT,
+        requested_at_ms INTEGER NOT NULL CHECK(requested_at_ms >= 0),
+        updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
+        processing_started_at_ms INTEGER
+      )
+    ''');
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS idx_report_jobs_status_requested '
+      'ON daily_report_jobs(status, requested_at_ms)',
+    );
   }
 }

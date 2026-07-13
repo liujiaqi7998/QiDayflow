@@ -527,6 +527,7 @@ std::string NormalizedState(CaptureState state) {
       return "starting";
     case CaptureState::kRecording:
       return "capturing";
+    case CaptureState::kSystemPaused:
     case CaptureState::kManualPaused:
     case CaptureState::kIdlePaused:
       return "paused";
@@ -1117,6 +1118,10 @@ NativeBridge::~NativeBridge() {
   if (event_channel_) {
     event_channel_->SetStreamHandler(nullptr);
   }
+}
+
+void NativeBridge::SetSessionLocked(bool locked) {
+  capture_service_.SetSessionLocked(locked);
 }
 
 void NativeBridge::HandleCaptureEvent(CaptureEvent event) {

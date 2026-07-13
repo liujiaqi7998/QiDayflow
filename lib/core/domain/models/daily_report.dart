@@ -54,3 +54,31 @@ final class DailyReport {
     );
   }
 }
+
+enum DailyReportJobStatus { pending, processing, failed }
+
+final class DailyReportJob {
+  DailyReportJob({
+    required String reportDate,
+    required this.status,
+    required this.retryCount,
+    this.errorCategory,
+    this.errorSummary,
+    required this.requestedAtMs,
+    required this.updatedAtMs,
+    this.processingStartedAtMs,
+  }) : reportDate = requireReportDate(reportDate) {
+    if (retryCount < 0 || requestedAtMs < 0 || updatedAtMs < 0) {
+      throw ArgumentError('Job counters and timestamps must be non-negative');
+    }
+  }
+
+  final String reportDate;
+  final DailyReportJobStatus status;
+  final int retryCount;
+  final String? errorCategory;
+  final String? errorSummary;
+  final int requestedAtMs;
+  final int updatedAtMs;
+  final int? processingStartedAtMs;
+}

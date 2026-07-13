@@ -3,12 +3,43 @@
 #include <optional>
 #include <shellapi.h>
 #include <strsafe.h>
+#include <wtsapi32.h>
 
 #include <string>
 
 #include "flutter/generated_plugin_registrant.h"
+#include "capture_runtime.h"
 #include "native_bridge.h"
 #include "resource.h"
+
+namespace {
+
+qi_day_flow::InitialSessionLockState QueryInitialSessionLockState() {
+  LPWSTR buffer = nullptr;
+  DWORD bytes_returned = 0;
+  if (WTSQuerySessionInformationW(
+          WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION,
+          WTSSessionInfoEx, &buffer, &bytes_returned) == FALSE ||
+      buffer == nullptr) {
+    return qi_day_flow::InitialSessionLockState::kUnknown;
+  }
+
+  const auto* info = reinterpret_cast<const WTSINFOEXW*>(buffer);
+  qi_day_flow::InitialSessionLockState state =
+      qi_day_flow::InitialSessionLockState::kUnknown;
+  if (bytes_returned >= sizeof(WTSINFOEXW) && info->Level == 1) {
+    const DWORD flags = info->Data.WTSInfoExLevel1.SessionFlags;
+    if (flags == WTS_SESSIONSTATE_LOCK) {
+      state = qi_day_flow::InitialSessionLockState::kLocked;
+    } else if (flags == WTS_SESSIONSTATE_UNLOCK) {
+      state = qi_day_flow::InitialSessionLockState::kUnlocked;
+    }
+  }
+  WTSFreeMemory(buffer);
+  return state;
+}
+
+}  // namespace
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project,
                              bool start_in_background)
@@ -18,6 +49,14 @@ FlutterWindow::~FlutterWindow() {}
 
 bool FlutterWindow::OnCreate() {
   if (!Win32Window::OnCreate()) {
+    return false;
+  }
+  session_notifications_registered_ =
+      WTSRegisterSessionNotification(GetHandle(), NOTIFY_FOR_THIS_SESSION) !=
+      FALSE;
+  if (!qi_day_flow::PlanSessionNotificationLifecycle(
+           true, session_notifications_registered_)
+           .keep_window) {
     return false;
   }
 
@@ -45,6 +84,13 @@ bool FlutterWindow::OnCreate() {
       [this](qi_day_flow::TrayCaptureState state) {
         UpdateTrayCaptureState(state);
       });
+  const qi_day_flow::InitialSessionLockState initial_session_state =
+      session_notifications_registered_
+          ? QueryInitialSessionLockState()
+          : qi_day_flow::InitialSessionLockState::kUnknown;
+  native_bridge_->SetSessionLocked(
+      qi_day_flow::ShouldPauseForInitialSessionState(
+          session_notifications_registered_, initial_session_state));
   taskbar_created_message_ = RegisterWindowMessageW(L"TaskbarCreated");
   SetupTrayIcon();
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
@@ -64,6 +110,10 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  if (session_notifications_registered_ && GetHandle() != nullptr) {
+    static_cast<void>(WTSUnRegisterSessionNotification(GetHandle()));
+    session_notifications_registered_ = false;
+  }
   if (GetHandle() != nullptr) {
     KillTimer(GetHandle(), kExitFallbackTimer);
   }
@@ -83,6 +133,20 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  if (message == WM_WTSSESSION_CHANGE && native_bridge_) {
+    switch (qi_day_flow::SessionNotificationCommandForEvent(
+        static_cast<uint32_t>(wparam))) {
+      case qi_day_flow::SessionNotificationCommand::kLock:
+        native_bridge_->SetSessionLocked(true);
+        break;
+      case qi_day_flow::SessionNotificationCommand::kUnlock:
+        native_bridge_->SetSessionLocked(false);
+        break;
+      case qi_day_flow::SessionNotificationCommand::kNone:
+        break;
+    }
+    return 0;
+  }
   if (message == qi_day_flow::NativeBridge::kDrainEventsMessage) {
     if (native_bridge_) {
       native_bridge_->DrainEvents();

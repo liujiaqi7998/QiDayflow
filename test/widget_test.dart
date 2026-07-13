@@ -243,6 +243,46 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('analysis queue renders a daily report item in a narrow window', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(480, 720));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final requestedAt = DateTime(2026, 7, 12, 20, 30);
+    final viewModel = _TestViewModel()
+      ..section = AppSection.analysisQueue
+      ..analysisQueue = AnalysisQueueViewData(
+        items: <AnalysisQueueItemViewData>[
+          AnalysisQueueItemViewData(
+            chunkId: null,
+            reportDate: '2026-07-12',
+            status: ProcessingStatus.failed,
+            recordedAt: requestedAt,
+            recordedUntil: requestedAt,
+            enqueuedAt: requestedAt,
+            updatedAt: requestedAt,
+            retryCount: 1,
+            errorSummary: '日报生成请求超时',
+          ),
+        ],
+      );
+
+    await tester.pumpWidget(QiDayFlowApp(viewModel: viewModel));
+    await tester.pumpAndSettle();
+
+    final item = find.byKey(
+      const ValueKey('analysis-queue-item-report-2026-07-12'),
+    );
+    expect(item, findsOneWidget);
+    expect(
+      find.descendant(of: item, matching: find.text('日报 · 2026-07-12')),
+      findsOneWidget,
+    );
+    expect(find.text('日报生成请求超时'), findsOneWidget);
+    expect(find.textContaining('切片 #null'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('analysis queue refresh and retry ignore duplicate clicks', (
     WidgetTester tester,
   ) async {

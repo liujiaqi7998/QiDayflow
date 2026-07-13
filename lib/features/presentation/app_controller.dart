@@ -56,6 +56,7 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
     Future<bool> Function(Uri uri)? releasePageOpener,
     OpenAiAnalysisService Function(OpenAiAnalysisConfig config)?
     analysisServiceBuilder,
+    DailyReportService? dailyReportService,
     AppInitializationStageHook? initializationStageHook,
   }) : _database = database,
        _repository = repository,
@@ -81,6 +82,7 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
        _releasePageOpener = releasePageOpener ?? _unsupportedReleasePageOpener,
        _analysisServiceBuilder =
            analysisServiceBuilder ?? _defaultAnalysisServiceBuilder,
+       _injectedDailyReportService = dailyReportService,
        _initializationStageHook = initializationStageHook,
        _evidenceStore = EvidenceStore(nativeService: nativeService) {
     if (maintenanceInterval <= Duration.zero) {
@@ -126,6 +128,7 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
   final Future<bool> Function(Uri uri) _releasePageOpener;
   final OpenAiAnalysisService Function(OpenAiAnalysisConfig config)
   _analysisServiceBuilder;
+  final DailyReportService? _injectedDailyReportService;
   final AppInitializationStageHook? _initializationStageHook;
   final StatisticsService _statisticsService = const StatisticsService();
   final EvidenceStore _evidenceStore;
@@ -149,6 +152,8 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
   Future<void>? _shutdownOperation;
   int _updateCheckGeneration = 0;
   int _latestSettingsSaveRevision = 0;
+  int _timelineLoadGeneration = 0;
+  int _reportLoadGeneration = 0;
   Timer? _recordingTimer;
   Timer? _refreshTimer;
   Timer? _messageTimer;
@@ -224,6 +229,8 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
       _databaseOpened = true;
       await _runInitializationHook(AppInitializationStage.databaseOpened);
       final recovery = await _repository.recoverInterruptedWork();
+      final recoveredReportJobs = await _repository
+          .recoverInterruptedDailyReportJobs();
       _nativeSubscription = _nativeService.events.listen(
         _handleNativeEvent,
         onError: (Object error, StackTrace stackTrace) {
@@ -262,22 +269,30 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
       _dailyGoalHours = await _settingsService.loadDailyGoalHours();
       _hasApiKey = _runtimeSettings.apiKeyConfigured;
       _syncSettingsView();
+      _dailyReportService =
+          _injectedDailyReportService ??
+          DailyReportService(
+            timelineRepository: _repository,
+            reportRepository: _repository,
+            serviceFactory: _createAnalysisService,
+            modelName: () async => _runtimeSettings.apiModel,
+          );
       _analysisCoordinator = AnalysisCoordinator(
         captureRepository: _repository,
         analysisRepository: _repository,
         timelineRepository: _repository,
         serviceFactory: _createAnalysisService,
+        dailyReportJobRepository: _repository,
+        reportGenerator: (reportDate) async {
+          await _dailyReportService.generate(reportDate);
+        },
+        reportIsFresh: (job) => _dailyReportService
+            .hasFreshReportGeneratedSince(job.reportDate, job.requestedAtMs),
         evidenceReader: ChunkEvidenceReader(nativeService: _nativeService),
         onChanged: () => unawaited(_handleAnalysisChanged()),
         onMessage: _setMessage,
       );
       _analysisCoordinatorInitialized = true;
-      _dailyReportService = DailyReportService(
-        timelineRepository: _repository,
-        reportRepository: _repository,
-        serviceFactory: _createAnalysisService,
-        modelName: () async => _runtimeSettings.apiModel,
-      );
       await _runInitializationHook(AppInitializationStage.coordinatorCreated);
       _initialized = true;
       await _runInitializationHook(AppInitializationStage.beforeDerivedRefresh);
@@ -286,6 +301,8 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
       if (_hasApiKey) _analysisCoordinator.schedule();
       if (recovery.sessionsFailed + recovery.chunksFailed > 0) {
         _setMessage('已恢复上次中断的采集与分析任务，原始证据保持不变');
+      } else if (recoveredReportJobs > 0) {
+        _setMessage('已恢复上次中断的日报任务，将在后台继续生成');
       }
       _refreshTimer = Timer.periodic(_maintenanceInterval, (_) {
         unawaited(_runPeriodicMaintenance());
@@ -587,17 +604,17 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
       _setMessage('生成日报前需要配置 API 密钥');
       return;
     }
-    reportLoading = true;
-    _safeNotify();
+    final reportDate = formatIsoDate(timelineDate);
     try {
-      dailyReport = await _dailyReportService.generate(
-        formatIsoDate(timelineDate),
-      );
+      final job = await _repository.enqueueDailyReportJob(reportDate);
+      if (formatIsoDate(timelineDate) == reportDate) {
+        reportLoading = job.status != DailyReportJobStatus.failed;
+        _safeNotify();
+      }
+      _analysisCoordinator.schedule();
+      unawaited(refreshAnalysisQueue());
     } on Object catch (error) {
-      _setMessage('日报生成失败：$error');
-    } finally {
-      reportLoading = false;
-      _safeNotify();
+      _setMessage('日报任务入队失败：${error.runtimeType}');
     }
   }
 
@@ -847,7 +864,11 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
   Future<void> refreshAnalysisQueue() async {
     if (!_initialized || _exiting) return;
     final entries = await _repository.listAnalysisQueue();
-    final items = entries.map(_toAnalysisQueueItem).toList(growable: false);
+    final reportJobs = await _repository.listDailyReportJobs();
+    final items = <AnalysisQueueItemViewData>[
+      ...entries.map(_toAnalysisQueueItem),
+      ...reportJobs.map(_toDailyReportQueueItem),
+    ]..sort(_compareAnalysisQueueItems);
     analysisQueue = AnalysisQueueViewData(
       items: List<AnalysisQueueItemViewData>.unmodifiable(items),
     );
@@ -1193,26 +1214,46 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
   }
 
   Future<void> _refreshTimeline() async {
+    final reportDate = formatIsoDate(timelineDate);
+    final generation = ++_timelineLoadGeneration;
     timelineLoading = true;
     _safeNotify();
     try {
-      final cards = await _repository.listCardsForReportDate(
-        formatIsoDate(timelineDate),
-      );
-      timelineCards = cards.map(_toViewCard).toList(growable: false);
+      final cards = await _repository.listCardsForReportDate(reportDate);
+      if (generation == _timelineLoadGeneration &&
+          formatIsoDate(timelineDate) == reportDate) {
+        timelineCards = cards.map(_toViewCard).toList(growable: false);
+      }
     } finally {
-      timelineLoading = false;
-      _safeNotify();
+      if (generation == _timelineLoadGeneration &&
+          formatIsoDate(timelineDate) == reportDate) {
+        timelineLoading = false;
+        _safeNotify();
+      }
     }
   }
 
   Future<void> _loadReport() async {
+    final reportDate = formatIsoDate(timelineDate);
+    final generation = ++_reportLoadGeneration;
     try {
-      dailyReport = await _dailyReportService.loadFresh(
-        formatIsoDate(timelineDate),
-      );
+      final loaded = await _dailyReportService.loadFresh(reportDate);
+      final job = await _repository.getDailyReportJob(reportDate);
+      if (generation != _reportLoadGeneration ||
+          formatIsoDate(timelineDate) != reportDate) {
+        return;
+      }
+      dailyReport = loaded;
+      reportLoading =
+          job?.status == DailyReportJobStatus.pending ||
+          job?.status == DailyReportJobStatus.processing;
     } on Object catch (error) {
+      if (generation != _reportLoadGeneration ||
+          formatIsoDate(timelineDate) != reportDate) {
+        return;
+      }
       dailyReport = null;
+      reportLoading = false;
       _setMessage('读取日报失败：$error');
     }
     _safeNotify();
@@ -1338,6 +1379,32 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
           : time(entry.processingStartedAtMs!),
       errorSummary: entry.status == ProcessingStatus.failed
           ? safeAnalysisErrorSummary(entry.errorMessage)
+          : null,
+    );
+  }
+
+  AnalysisQueueItemViewData _toDailyReportQueueItem(DailyReportJob job) {
+    DateTime time(int milliseconds) =>
+        DateTime.fromMillisecondsSinceEpoch(milliseconds, isUtc: true);
+    final requestedAt = time(job.requestedAtMs);
+    return AnalysisQueueItemViewData(
+      chunkId: null,
+      reportDate: job.reportDate,
+      status: switch (job.status) {
+        DailyReportJobStatus.pending => ProcessingStatus.pending,
+        DailyReportJobStatus.processing => ProcessingStatus.processing,
+        DailyReportJobStatus.failed => ProcessingStatus.failed,
+      },
+      recordedAt: requestedAt,
+      recordedUntil: requestedAt,
+      enqueuedAt: requestedAt,
+      updatedAt: time(job.updatedAtMs),
+      retryCount: job.retryCount,
+      processingStartedAt: job.processingStartedAtMs == null
+          ? null
+          : time(job.processingStartedAtMs!),
+      errorSummary: job.status == DailyReportJobStatus.failed
+          ? job.errorSummary
           : null,
     );
   }
@@ -1660,6 +1727,7 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
 
     if (_analysisCoordinatorInitialized) {
       _analysisCoordinatorInitialized = false;
+      _dailyReportService.cancelActiveGeneration();
       await attempt(_analysisCoordinator.stop);
     }
     await attempt(() async => _settingsSaveTail);
@@ -1713,3 +1781,23 @@ final class _NativeStopWait {
 bool _sameWindowsPath(String left, String right) =>
     p.windows.normalize(left).toLowerCase() ==
     p.windows.normalize(right).toLowerCase();
+
+int _compareAnalysisQueueItems(
+  AnalysisQueueItemViewData left,
+  AnalysisQueueItemViewData right,
+) {
+  int rank(ProcessingStatus status) => switch (status) {
+    ProcessingStatus.processing => 0,
+    ProcessingStatus.pending => 1,
+    ProcessingStatus.failed => 2,
+    ProcessingStatus.completed => 3,
+  };
+
+  final statusOrder = rank(left.status).compareTo(rank(right.status));
+  if (statusOrder != 0) return statusOrder;
+  final timeOrder = left.status == ProcessingStatus.failed
+      ? right.updatedAt.compareTo(left.updatedAt)
+      : left.enqueuedAt.compareTo(right.enqueuedAt);
+  if (timeOrder != 0) return timeOrder;
+  return left.id.compareTo(right.id);
+}

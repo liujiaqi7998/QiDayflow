@@ -414,13 +414,13 @@ bool TestExtremeScheduleInputsSaturateWithoutDuplicateWork() {
 bool TestWorkerControlAndBoundaryPrecedeTopologyInitialization() {
   using qi_day_flow::CaptureWorkerAction;
   using qi_day_flow::DecideCaptureWorkerAction;
-  if (!Expect(DecideCaptureWorkerAction(true, false, false, true, 60'000,
+  if (!Expect(DecideCaptureWorkerAction(true, false, false, false, true, 60'000,
                                         false) == CaptureWorkerAction::kStop,
               "stop did not precede topology initialization") ||
-      !Expect(DecideCaptureWorkerAction(false, true, false, true, 60'000,
+      !Expect(DecideCaptureWorkerAction(false, true, false, false, true, 60'000,
                                         false) == CaptureWorkerAction::kPause,
               "manual pause did not precede topology initialization") ||
-      !Expect(DecideCaptureWorkerAction(false, false, true, true, 60'000,
+      !Expect(DecideCaptureWorkerAction(false, false, false, true, true, 60'000,
                                         false) == CaptureWorkerAction::kPause,
               "idle pause did not precede topology initialization")) {
     return false;
@@ -429,7 +429,7 @@ bool TestWorkerControlAndBoundaryPrecedeTopologyInitialization() {
   uint32_t initialization_attempts = 0;
   for (int64_t elapsed_ms = 0; elapsed_ms <= 60'000; elapsed_ms += 5'000) {
     const CaptureWorkerAction action = DecideCaptureWorkerAction(
-        false, false, false, true, elapsed_ms, false);
+        false, false, false, false, true, elapsed_ms, false);
     if (elapsed_ms < 60'000) {
       if (!Expect(action == CaptureWorkerAction::kInitializeTopology,
                   "topology retry was not selected before the boundary")) {
@@ -443,20 +443,90 @@ bool TestWorkerControlAndBoundaryPrecedeTopologyInitialization() {
   }
   return Expect(initialization_attempts == 12,
                 "topology failure simulation had an unexpected retry count") &&
-         Expect(qi_day_flow::ShouldWakeCaptureRetryWait(false, true),
+         Expect(qi_day_flow::ShouldWakeCaptureRetryWait(false, true, false),
                 "manual pause did not interrupt the topology retry wait") &&
-         Expect(qi_day_flow::ShouldWakeCaptureRetryWait(true, false),
+         Expect(qi_day_flow::ShouldWakeCaptureRetryWait(true, false, false),
                 "stop did not interrupt the topology retry wait") &&
-         Expect(!qi_day_flow::ShouldWakeCaptureRetryWait(false, false),
+         Expect(!qi_day_flow::ShouldWakeCaptureRetryWait(false, false, false),
                 "retry wait woke without a control request") &&
-         Expect(DecideCaptureWorkerAction(false, false, false, false, 60'000,
+         Expect(DecideCaptureWorkerAction(false, false, false, false, false, 60'000,
                                           false) ==
                     CaptureWorkerAction::kInitializeTopology,
                 "empty chunk incorrectly requested finalization") &&
-         Expect(DecideCaptureWorkerAction(false, false, false, true, 59'999,
+         Expect(DecideCaptureWorkerAction(false, false, false, false, true, 59'999,
                                           true) ==
                     CaptureWorkerAction::kPollSchedule,
                 "ready worker did not proceed to its schedule");
+}
+
+bool TestSessionLockPauseIsIndependentFromManualPause() {
+  using qi_day_flow::CaptureWorkerAction;
+  using qi_day_flow::DecideCaptureWorkerAction;
+
+  return Expect(
+             DecideCaptureWorkerAction(false, false, true, false, true, 0,
+                                       true) == CaptureWorkerAction::kPause,
+             "recording session did not pause when Windows locked") &&
+         Expect(
+             DecideCaptureWorkerAction(false, false, false, false, false, 0,
+                                       true) ==
+                 CaptureWorkerAction::kPollSchedule,
+             "unlock did not allow a system-only pause to resume") &&
+         Expect(
+             DecideCaptureWorkerAction(false, true, false, false, false, 0,
+                                       true) == CaptureWorkerAction::kPause,
+             "unlock incorrectly cleared a manual pause") &&
+         Expect(
+             DecideCaptureWorkerAction(true, true, true, true, true, 60'000,
+                                       false) == CaptureWorkerAction::kStop,
+             "stop did not take priority over every pause reason") &&
+         Expect(qi_day_flow::ShouldWakeCaptureRetryWait(false, false, true),
+                "session lock did not interrupt topology retry wait") &&
+         Expect(!qi_day_flow::ShouldWakeCaptureRetryWait(false, false, false),
+                "inactive controls interrupted topology retry wait");
+}
+
+bool TestSessionNotificationMappingAndLifecycle() {
+  using qi_day_flow::InitialSessionLockState;
+  using qi_day_flow::SessionNotificationCommand;
+  const qi_day_flow::SessionNotificationLifecycle failed_base =
+      qi_day_flow::PlanSessionNotificationLifecycle(false, false);
+  const qi_day_flow::SessionNotificationLifecycle failed_registration =
+      qi_day_flow::PlanSessionNotificationLifecycle(true, false);
+  const qi_day_flow::SessionNotificationLifecycle registered =
+      qi_day_flow::PlanSessionNotificationLifecycle(true, true);
+
+  return Expect(
+             qi_day_flow::SessionNotificationCommandForEvent(0x7) ==
+                 SessionNotificationCommand::kLock,
+             "WTS session lock was not mapped") &&
+         Expect(
+             qi_day_flow::SessionNotificationCommandForEvent(0x8) ==
+                 SessionNotificationCommand::kUnlock,
+             "WTS session unlock was not mapped") &&
+         Expect(
+             qi_day_flow::SessionNotificationCommandForEvent(0x5) ==
+                 SessionNotificationCommand::kNone,
+             "unrelated WTS event changed capture state") &&
+         Expect(!failed_base.keep_window && !failed_base.unregister_on_destroy,
+                "failed base creation retained session registration") &&
+         Expect(failed_registration.keep_window &&
+                    !failed_registration.unregister_on_destroy,
+                "failed WTS registration prevented fail-open startup") &&
+         Expect(registered.keep_window && registered.unregister_on_destroy,
+                "successful WTS registration was not paired with destroy") &&
+         Expect(qi_day_flow::ShouldPauseForInitialSessionState(
+                    true, InitialSessionLockState::kLocked),
+                "locked startup did not enter privacy pause") &&
+         Expect(!qi_day_flow::ShouldPauseForInitialSessionState(
+                    true, InitialSessionLockState::kUnlocked),
+                "unlocked startup incorrectly paused capture") &&
+         Expect(qi_day_flow::ShouldPauseForInitialSessionState(
+                    true, InitialSessionLockState::kUnknown),
+                "unknown WTS state did not fail closed") &&
+         Expect(qi_day_flow::ShouldPauseForInitialSessionState(
+                    false, InitialSessionLockState::kUnknown),
+                "failed WTS registration did not fail closed for capture");
 }
 
 bool TestCpuUsageCalculation() {
@@ -612,17 +682,23 @@ int main() {
   if (!TestWorkerControlAndBoundaryPrecedeTopologyInitialization()) {
     return 12;
   }
-  if (!TestCpuUsageCalculation()) {
+  if (!TestSessionLockPauseIsIndependentFromManualPause()) {
     return 13;
   }
-  if (!TestInvalidCpuIntervalsAndMemoryCommit()) {
+  if (!TestSessionNotificationMappingAndLifecycle()) {
     return 14;
   }
-  if (!TestDefaultCaptureScheduleUsesTenSeconds()) {
+  if (!TestCpuUsageCalculation()) {
     return 15;
   }
-  if (!TestStopPlanNeverJoinsWorkerOnPlatformThread()) {
+  if (!TestInvalidCpuIntervalsAndMemoryCommit()) {
     return 16;
+  }
+  if (!TestDefaultCaptureScheduleUsesTenSeconds()) {
+    return 17;
+  }
+  if (!TestStopPlanNeverJoinsWorkerOnPlatformThread()) {
+    return 18;
   }
   std::cout << "capture runtime state and resource calculations passed\n";
   return 0;

@@ -288,7 +288,9 @@ class _QueueItem extends StatelessWidget {
       ProcessingStatus.failed => Icons.error_outline,
       ProcessingStatus.completed => Icons.check_circle_outline,
     };
-    final identifier = item.batchId == null
+    final identifier = item.isDailyReport
+        ? '日报 · ${item.reportDate}'
+        : item.batchId == null
         ? '切片 #${item.chunkId}'
         : '批次 #${item.batchId} · 切片 #${item.chunkId}';
     return Container(
@@ -333,16 +335,18 @@ class _QueueItem extends StatelessWidget {
             spacing: 18,
             runSpacing: 8,
             children: [
-              _MetadataText(
-                icon: Icons.videocam_outlined,
-                text:
-                    '录制 ${formatClock(item.recordedAt)} - '
-                    '${formatClock(item.recordedUntil)}',
-              ),
-              _MetadataText(
-                icon: Icons.timelapse,
-                text: '时长 ${formatDuration(item.recordingDuration)}',
-              ),
+              if (!item.isDailyReport) ...[
+                _MetadataText(
+                  icon: Icons.videocam_outlined,
+                  text:
+                      '录制 ${formatClock(item.recordedAt)} - '
+                      '${formatClock(item.recordedUntil)}',
+                ),
+                _MetadataText(
+                  icon: Icons.timelapse,
+                  text: '时长 ${formatDuration(item.recordingDuration)}',
+                ),
+              ],
               _MetadataText(
                 icon: Icons.playlist_add,
                 text: '入队 ${_formatTimestamp(item.enqueuedAt)}',
@@ -358,7 +362,9 @@ class _QueueItem extends StatelessWidget {
             _StatusDetail(
               icon: Icons.hourglass_top,
               color: statusColor,
-              text: _processingText(item.processingStartedAt),
+              text: item.isDailyReport
+                  ? '正在后台生成日报'
+                  : _processingText(item.processingStartedAt),
             ),
           ],
           if (item.status == ProcessingStatus.failed) ...[

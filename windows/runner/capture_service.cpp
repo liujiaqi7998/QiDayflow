@@ -1339,6 +1339,11 @@ class CaptureService::Impl {
     return true;
   }
 
+  void SetSessionLocked(bool locked) {
+    system_pause_requested_.store(locked);
+    wake_condition_.notify_all();
+  }
+
   bool Stop(std::string* error) {
     const CaptureStopPlan plan =
         PlanCaptureStop(state_.load() == CaptureState::kStopped);
@@ -1426,8 +1431,10 @@ class CaptureService::Impl {
     while (true) {
       const bool stop_requested = stop_requested_.load();
       const bool manual_paused = manual_pause_requested_.load();
+      const bool system_paused = system_pause_requested_.load();
       const bool idle_paused =
-          !stop_requested && !manual_paused && config_.idle_pause_enabled &&
+          !stop_requested && !manual_paused && !system_paused &&
+          config_.idle_pause_enabled &&
           GetIdleMillisecondsInternal() >=
               static_cast<uint64_t>(config_.idle_timeout_seconds) * 1000ULL;
       const SteadyClock::time_point now = SteadyClock::now();
@@ -1439,7 +1446,7 @@ class CaptureService::Impl {
                     .count()
               : 0;
       const CaptureWorkerAction action = DecideCaptureWorkerAction(
-          stop_requested, manual_paused, idle_paused,
+          stop_requested, manual_paused, system_paused, idle_paused,
           chunk_open_ && chunk_progress_.frame_count() > 0, chunk_elapsed_ms,
           !output_captures_.empty());
 
@@ -1451,10 +1458,15 @@ class CaptureService::Impl {
           FinalizeCurrentChunk(now);
           was_paused = true;
         }
-        EmitStateIfChanged(manual_paused ? CaptureState::kManualPaused
-                                        : CaptureState::kIdlePaused,
-                           manual_paused ? "manual" : "idle");
-        WaitWhilePaused(std::chrono::milliseconds(250), manual_paused);
+        const CaptureState paused_state =
+            system_paused ? CaptureState::kSystemPaused
+                          : manual_paused ? CaptureState::kManualPaused
+                                          : CaptureState::kIdlePaused;
+        EmitStateIfChanged(paused_state,
+                           system_paused ? "sessionLocked"
+                                         : manual_paused ? "manual" : "idle");
+        WaitWhilePaused(std::chrono::milliseconds(250), manual_paused,
+                        system_paused);
         continue;
       }
       if (action == CaptureWorkerAction::kFinalizeChunk) {
@@ -1558,7 +1570,7 @@ class CaptureService::Impl {
       if (stop_requested_.load()) {
         break;
       }
-      if (manual_pause_requested_.load()) {
+      if (manual_pause_requested_.load() || system_pause_requested_.load()) {
         continue;
       }
 
@@ -1635,7 +1647,8 @@ class CaptureService::Impl {
     std::unique_lock<std::mutex> lock(wait_mutex_);
     wake_condition_.wait_for(lock, duration, [this]() {
       return ShouldWakeCaptureRetryWait(stop_requested_.load(),
-                                        manual_pause_requested_.load());
+                                        manual_pause_requested_.load(),
+                                        system_pause_requested_.load());
     });
   }
 
@@ -1644,11 +1657,14 @@ class CaptureService::Impl {
   }
 
   void WaitWhilePaused(std::chrono::milliseconds duration,
-                       bool manual_paused) {
+                       bool manual_paused,
+                       bool system_paused) {
     std::unique_lock<std::mutex> lock(wait_mutex_);
-    wake_condition_.wait_for(lock, duration, [this, manual_paused]() {
+    wake_condition_.wait_for(lock, duration,
+                             [this, manual_paused, system_paused]() {
       return stop_requested_.load() ||
-             manual_pause_requested_.load() != manual_paused;
+             manual_pause_requested_.load() != manual_paused ||
+             system_pause_requested_.load() != system_paused;
     });
   }
 
@@ -2338,6 +2354,7 @@ class CaptureService::Impl {
   std::atomic<CaptureState> state_{CaptureState::kStopped};
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> manual_pause_requested_{false};
+  std::atomic<bool> system_pause_requested_{false};
   CaptureConfig config_;
   std::string session_id_;
 
@@ -2607,6 +2624,10 @@ bool CaptureService::Pause(std::string* error) {
 
 bool CaptureService::Resume(std::string* error) {
   return impl_->Resume(error);
+}
+
+void CaptureService::SetSessionLocked(bool locked) {
+  impl_->SetSessionLocked(locked);
 }
 
 bool CaptureService::Stop(std::string* error) {

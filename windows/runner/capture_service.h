@@ -104,6 +104,7 @@ enum class CaptureState {
   kStopped,
   kStarting,
   kRecording,
+  kSystemPaused,
   kManualPaused,
   kIdlePaused,
   kStopping,
@@ -144,6 +145,7 @@ class CaptureService {
   bool Start(const CaptureConfig& config, std::string* error);
   bool Pause(std::string* error);
   bool Resume(std::string* error);
+  void SetSessionLocked(bool locked);
   bool Stop(std::string* error);
   void Shutdown();
 

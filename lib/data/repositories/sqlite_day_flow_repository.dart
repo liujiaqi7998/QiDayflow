@@ -12,7 +12,8 @@ final class SqliteDayFlowRepository
         CaptureRepository,
         AnalysisRepository,
         TimelineRepository,
-        DailyReportRepository {
+        DailyReportRepository,
+        DailyReportJobRepository {
   SqliteDayFlowRepository(this.database, {this.clock = const SystemClock()});
 
   final AppDatabase database;
@@ -1116,6 +1117,165 @@ final class SqliteDayFlowRepository
     );
   }
 
+  @override
+  Future<DailyReportJob> enqueueDailyReportJob(String reportDate) async {
+    final date = requireReportDate(reportDate);
+    final now = clock.nowUtcEpochMs();
+    final db = await database.open();
+    await db.rawInsert(
+      '''
+      INSERT INTO daily_report_jobs(
+        report_date, status, retry_count, requested_at_ms, updated_at_ms
+      ) VALUES (?, 'pending', 0, ?, ?)
+      ON CONFLICT(report_date) DO UPDATE SET
+        status = 'pending',
+        retry_count = 0,
+        error_category = NULL,
+        error_summary = NULL,
+        requested_at_ms = excluded.requested_at_ms,
+        updated_at_ms = excluded.updated_at_ms,
+        processing_started_at_ms = NULL
+      WHERE daily_report_jobs.status = 'failed'
+      ''',
+      <Object?>[date, now, now],
+    );
+    return (await getDailyReportJob(date))!;
+  }
+
+  @override
+  Future<DailyReportJob?> getDailyReportJob(String reportDate) async {
+    final db = await database.open();
+    final rows = await db.query(
+      'daily_report_jobs',
+      where: 'report_date = ?',
+      whereArgs: <Object?>[requireReportDate(reportDate)],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : _dailyReportJobFromRow(rows.single);
+  }
+
+  @override
+  Future<List<DailyReportJob>> listDailyReportJobs() async {
+    final db = await database.open();
+    final rows = await db.rawQuery('''
+      SELECT * FROM daily_report_jobs
+      ORDER BY CASE status
+        WHEN 'processing' THEN 0
+        WHEN 'pending' THEN 1
+        ELSE 2
+      END, requested_at_ms ASC, report_date ASC
+    ''');
+    return rows.map(_dailyReportJobFromRow).toList(growable: false);
+  }
+
+  @override
+  Future<DailyReportJob?> claimNextDailyReportJob() {
+    final now = clock.nowUtcEpochMs();
+    return database.transaction((transaction) async {
+      final rows = await transaction.query(
+        'daily_report_jobs',
+        columns: <String>['report_date'],
+        where: 'status = ?',
+        whereArgs: <Object?>[DailyReportJobStatus.pending.name],
+        orderBy: 'requested_at_ms ASC, report_date ASC',
+        limit: 1,
+      );
+      if (rows.isEmpty) return null;
+      final date = rows.single['report_date']! as String;
+      final claimed = await transaction.update(
+        'daily_report_jobs',
+        <String, Object?>{
+          'status': DailyReportJobStatus.processing.name,
+          'updated_at_ms': now,
+          'processing_started_at_ms': now,
+        },
+        where: 'report_date = ? AND status = ?',
+        whereArgs: <Object?>[date, DailyReportJobStatus.pending.name],
+      );
+      if (claimed != 1) return null;
+      final claimedRows = await transaction.query(
+        'daily_report_jobs',
+        where: 'report_date = ?',
+        whereArgs: <Object?>[date],
+        limit: 1,
+      );
+      return _dailyReportJobFromRow(claimedRows.single);
+    });
+  }
+
+  @override
+  Future<bool> completeDailyReportJob(String reportDate) async {
+    final db = await database.open();
+    return await db.delete(
+          'daily_report_jobs',
+          where: 'report_date = ? AND status = ?',
+          whereArgs: <Object?>[
+            requireReportDate(reportDate),
+            DailyReportJobStatus.processing.name,
+          ],
+        ) ==
+        1;
+  }
+
+  @override
+  Future<bool> markDailyReportJobFailed(
+    String reportDate, {
+    required String category,
+    required String summary,
+  }) async {
+    final db = await database.open();
+    return await db.rawUpdate(
+          '''
+          UPDATE daily_report_jobs
+          SET status = ?, retry_count = retry_count + 1,
+              error_category = ?, error_summary = ?, updated_at_ms = ?,
+              processing_started_at_ms = NULL
+          WHERE report_date = ? AND status = ?
+          ''',
+          <Object?>[
+            DailyReportJobStatus.failed.name,
+            requireNonBlank(category, 'category'),
+            requireNonBlank(summary, 'summary'),
+            clock.nowUtcEpochMs(),
+            requireReportDate(reportDate),
+            DailyReportJobStatus.processing.name,
+          ],
+        ) ==
+        1;
+  }
+
+  @override
+  Future<int> retryFailedDailyReportJobs() async {
+    final db = await database.open();
+    return db.update(
+      'daily_report_jobs',
+      <String, Object?>{
+        'status': DailyReportJobStatus.pending.name,
+        'error_category': null,
+        'error_summary': null,
+        'updated_at_ms': clock.nowUtcEpochMs(),
+        'processing_started_at_ms': null,
+      },
+      where: 'status = ?',
+      whereArgs: <Object?>[DailyReportJobStatus.failed.name],
+    );
+  }
+
+  @override
+  Future<int> recoverInterruptedDailyReportJobs() async {
+    final db = await database.open();
+    return db.update(
+      'daily_report_jobs',
+      <String, Object?>{
+        'status': DailyReportJobStatus.pending.name,
+        'updated_at_ms': clock.nowUtcEpochMs(),
+        'processing_started_at_ms': null,
+      },
+      where: 'status = ?',
+      whereArgs: <Object?>[DailyReportJobStatus.processing.name],
+    );
+  }
+
   SettingRecord _settingFromRow(Map<String, Object?> row) {
     return SettingRecord(
       key: row['key']! as String,
@@ -1370,6 +1530,19 @@ final class SqliteDayFlowRepository
       generatedAtMs: row['generated_at_ms']! as int,
       model: row['model']! as String,
       invalidatedAtMs: row['invalidated_at_ms'] as int?,
+    );
+  }
+
+  DailyReportJob _dailyReportJobFromRow(Map<String, Object?> row) {
+    return DailyReportJob(
+      reportDate: row['report_date']! as String,
+      status: DailyReportJobStatus.values.byName(row['status']! as String),
+      retryCount: row['retry_count']! as int,
+      errorCategory: row['error_category'] as String?,
+      errorSummary: row['error_summary'] as String?,
+      requestedAtMs: row['requested_at_ms']! as int,
+      updatedAtMs: row['updated_at_ms']! as int,
+      processingStartedAtMs: row['processing_started_at_ms'] as int?,
     );
   }
 

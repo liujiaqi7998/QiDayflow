@@ -156,3 +156,25 @@ abstract interface class DailyReportRepository {
 
   Future<int> invalidateDailyReport(String reportDate);
 }
+
+abstract interface class DailyReportJobRepository {
+  Future<DailyReportJob> enqueueDailyReportJob(String reportDate);
+
+  Future<DailyReportJob?> getDailyReportJob(String reportDate);
+
+  Future<List<DailyReportJob>> listDailyReportJobs();
+
+  Future<DailyReportJob?> claimNextDailyReportJob();
+
+  Future<bool> completeDailyReportJob(String reportDate);
+
+  Future<bool> markDailyReportJobFailed(
+    String reportDate, {
+    required String category,
+    required String summary,
+  });
+
+  Future<int> retryFailedDailyReportJobs();
+
+  Future<int> recoverInterruptedDailyReportJobs();
+}

@@ -10,27 +10,54 @@ import '../openai/openai_analysis_service.dart';
 import 'chunk_evidence.dart';
 
 typedef AnalysisServiceFactory = Future<OpenAiAnalysisService> Function();
+typedef DailyReportGenerator = Future<void> Function(String reportDate);
+typedef DailyReportFreshnessChecker = Future<bool> Function(DailyReportJob job);
 
 class AnalysisCoordinator {
   static const int _retryPageSize = 100;
+  static const int _maxAnalysisWorkBeforeReport = 3;
 
   AnalysisCoordinator({
     required CaptureRepository captureRepository,
     required AnalysisRepository analysisRepository,
     required TimelineRepository timelineRepository,
     required AnalysisServiceFactory serviceFactory,
+    DailyReportJobRepository? dailyReportJobRepository,
+    DailyReportGenerator? reportGenerator,
+    DailyReportFreshnessChecker? reportIsFresh,
     this.evidenceReader = const ChunkEvidenceReader(),
     this.onChanged,
     this.onMessage,
   }) : _captureRepository = captureRepository,
        _analysisRepository = analysisRepository,
        _timelineRepository = timelineRepository,
-       _serviceFactory = serviceFactory;
+       _serviceFactory = serviceFactory,
+       _dailyReportJobRepository = dailyReportJobRepository,
+       _reportGenerator = reportGenerator,
+       _reportIsFresh = reportIsFresh {
+    final reportDependencies = <Object?>[
+      dailyReportJobRepository,
+      reportGenerator,
+      reportIsFresh,
+    ];
+    final configuredCount = reportDependencies
+        .where((item) => item != null)
+        .length;
+    if (configuredCount != 0 && configuredCount != reportDependencies.length) {
+      throw ArgumentError(
+        'dailyReportJobRepository, reportGenerator, and reportIsFresh '
+        'must be provided together',
+      );
+    }
+  }
 
   final CaptureRepository _captureRepository;
   final AnalysisRepository _analysisRepository;
   final TimelineRepository _timelineRepository;
   final AnalysisServiceFactory _serviceFactory;
+  final DailyReportJobRepository? _dailyReportJobRepository;
+  final DailyReportGenerator? _reportGenerator;
+  final DailyReportFreshnessChecker? _reportIsFresh;
   final ChunkEvidenceReader evidenceReader;
   final VoidCallback? onChanged;
   final void Function(String message)? onMessage;
@@ -39,6 +66,7 @@ class AnalysisCoordinator {
   final Set<int> _queuedRetryBatchIds = <int>{};
   final Queue<int> _retryChunkIds = Queue<int>();
   Future<void>? _worker;
+  Future<void>? _reportWorker;
   Future<void>? _retryInitialization;
   OpenAiAnalysisService? _activeService;
   bool _stopping = false;
@@ -49,8 +77,9 @@ class AnalysisCoordinator {
   int _retryBatchUpperBound = 0;
   int _retryChunkCursor = 0;
   int _retryRequestedAtMs = 0;
+  int _analysisWorkSinceReportCheck = 0;
 
-  bool get isRunning => _worker != null;
+  bool get isRunning => _worker != null || _reportWorker != null;
 
   void schedule() {
     if (_stopping || _worker != null) return;
@@ -90,6 +119,7 @@ class AnalysisCoordinator {
   }
 
   Future<void> _initializeRetryScan() async {
+    await _dailyReportJobRepository?.retryFailedDailyReportJobs();
     final requestedAtMs = DateTime.now().toUtc().millisecondsSinceEpoch;
     final batchUpperBound = await _analysisRepository.getMaxAnalysisBatchId();
     if (_stopping) return;
@@ -108,7 +138,13 @@ class AnalysisCoordinator {
   Future<void> stop() async {
     _stopping = true;
     _activeService?.close();
-    await _worker;
+    final retryInitialization = _retryInitialization;
+    if (retryInitialization != null) await retryInitialization;
+    final worker = _worker;
+    final reportWorker = _reportWorker;
+    await Future.wait(
+      <Future<void>?>[worker, reportWorker].whereType<Future<void>>(),
+    );
   }
 
   Future<void> _scheduleAgainIfNeeded() async {
@@ -123,7 +159,15 @@ class AnalysisCoordinator {
       dueAtMs: DateTime.now().toUtc().millisecondsSinceEpoch,
       limit: 1,
     );
-    if (pending.isNotEmpty) schedule();
+    if (pending.isNotEmpty) {
+      schedule();
+      return;
+    }
+    final reportJobs = await _dailyReportJobRepository?.listDailyReportJobs();
+    if (reportJobs?.any((job) => job.status == DailyReportJobStatus.pending) ??
+        false) {
+      schedule();
+    }
   }
 
   Future<void> _drain() async {
@@ -133,12 +177,17 @@ class AnalysisCoordinator {
           _retryScanActive) {
         await _refillRetryWork();
       }
+      if (_analysisWorkSinceReportCheck >= _maxAnalysisWorkBeforeReport) {
+        _analysisWorkSinceReportCheck = 0;
+        if (await _processOneDailyReport()) continue;
+      }
       if (_retryBatchIds.isNotEmpty) {
         final batchId = _retryBatchIds.removeFirst();
         _queuedRetryBatchIds.remove(batchId);
         await _processBatch(batchId);
+        _analysisWorkSinceReportCheck++;
         onChanged?.call();
-        await _processOneFreshChunk();
+        if (await _processOneFreshChunk()) _analysisWorkSinceReportCheck++;
         continue;
       }
       if (_retryChunkIds.isNotEmpty) {
@@ -149,12 +198,21 @@ class AnalysisCoordinator {
           ]);
           onChanged?.call();
           await _processBatch(batch.id!);
+          _analysisWorkSinceReportCheck++;
           onChanged?.call();
         }
-        await _processOneFreshChunk();
+        if (await _processOneFreshChunk()) _analysisWorkSinceReportCheck++;
         continue;
       }
-      if (!await _processOneFreshChunk()) return;
+      if (await _processOneFreshChunk()) {
+        _analysisWorkSinceReportCheck++;
+        continue;
+      }
+      if (await _processOneDailyReport()) {
+        _analysisWorkSinceReportCheck = 0;
+        continue;
+      }
+      return;
     }
   }
 
@@ -212,6 +270,84 @@ class AnalysisCoordinator {
     await _processBatch(batch.id!);
     onChanged?.call();
     return true;
+  }
+
+  Future<bool> _processOneDailyReport() async {
+    if (_reportWorker != null) return false;
+    final repository = _dailyReportJobRepository;
+    final generator = _reportGenerator;
+    final isFresh = _reportIsFresh;
+    if (repository == null || generator == null || isFresh == null) {
+      return false;
+    }
+    final job = await repository.claimNextDailyReportJob();
+    if (job == null) {
+      return false;
+    }
+    onChanged?.call();
+    if (_stopping) {
+      await repository.recoverInterruptedDailyReportJobs();
+      onChanged?.call();
+      return false;
+    }
+
+    late final Future<void> reportWorker;
+    reportWorker =
+        _runDailyReportJob(
+              repository: repository,
+              generator: generator,
+              isFresh: isFresh,
+              job: job,
+            )
+            .catchError((Object error, StackTrace stackTrace) {
+              onMessage?.call('日报队列异常：${_errorMessage(error)}');
+            })
+            .whenComplete(() {
+              if (identical(_reportWorker, reportWorker)) {
+                _reportWorker = null;
+              }
+              if (!_stopping) schedule();
+            });
+    _reportWorker = reportWorker;
+    return true;
+  }
+
+  Future<void> _runDailyReportJob({
+    required DailyReportJobRepository repository,
+    required DailyReportGenerator generator,
+    required DailyReportFreshnessChecker isFresh,
+    required DailyReportJob job,
+  }) async {
+    try {
+      if (await isFresh(job)) {
+        if (!await repository.completeDailyReportJob(job.reportDate)) {
+          throw StateError('日报任务完成状态已变化');
+        }
+        return;
+      }
+      if (_stopping) {
+        await repository.recoverInterruptedDailyReportJobs();
+        return;
+      }
+      await generator(job.reportDate);
+      if (!await repository.completeDailyReportJob(job.reportDate)) {
+        throw StateError('日报任务完成状态已变化');
+      }
+    } on Object catch (error) {
+      if (_stopping) {
+        await repository.recoverInterruptedDailyReportJobs();
+      } else {
+        final summary = _safeReportErrorSummary(error);
+        await repository.markDailyReportJobFailed(
+          job.reportDate,
+          category: _reportErrorCategory(error),
+          summary: summary,
+        );
+        onMessage?.call('日报生成失败：$summary');
+      }
+    } finally {
+      onChanged?.call();
+    }
   }
 
   Future<void> _processBatch(int batchId) async {
@@ -588,6 +724,36 @@ class AnalysisCoordinator {
         ? message
         : '${message.substring(0, 1000)}...';
   }
+}
+
+String _reportErrorCategory(Object error) {
+  final value = error.toString().toLowerCase();
+  if (value.contains('revision') || value.contains('版本')) return 'stale';
+  if (value.contains('api') && value.contains('key')) return 'configuration';
+  if (value.contains('timeout') || value.contains('超时')) return 'timeout';
+  if (value.contains('network') || value.contains('socket')) return 'network';
+  return 'generation';
+}
+
+String _safeReportErrorSummary(Object error) {
+  final value = error.toString();
+  if (RegExp(r'api.?key|密钥', caseSensitive: false).hasMatch(value)) {
+    return '模型服务配置错误';
+  }
+  if (RegExp(r'time.?out|超时', caseSensitive: false).hasMatch(value)) {
+    return '日报生成请求超时';
+  }
+  if (RegExp(
+    r'network|socket|connection',
+    caseSensitive: false,
+  ).hasMatch(value)) {
+    return '网络连接失败';
+  }
+  if (RegExp(r'revision|版本.*变化', caseSensitive: false).hasMatch(value)) {
+    return '生成期间时间轴已更新，请重试';
+  }
+  if (value.contains('当天没有可生成日报')) return '当天暂无可生成日报的活动';
+  return '日报生成失败，详细信息已隐藏';
 }
 
 final class _TrustedWindowInterval {

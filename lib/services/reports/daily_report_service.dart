@@ -2,6 +2,7 @@
 
 import '../../core/domain/domain.dart';
 import '../openai/analysis_models.dart' as ai;
+import '../openai/openai_analysis_service.dart';
 import '../processing/analysis_coordinator.dart';
 
 class DailyReportService {
@@ -21,6 +22,15 @@ class DailyReportService {
   final DailyReportRepository _reportRepository;
   final AnalysisServiceFactory _serviceFactory;
   final Future<String> Function() _modelName;
+  OpenAiAnalysisService? _activeService;
+  int _cancellationGeneration = 0;
+
+  void cancelActiveGeneration() {
+    _cancellationGeneration++;
+    final active = _activeService;
+    _activeService = null;
+    active?.close();
+  }
 
   Future<String?> loadFresh(String reportDate) async {
     final report = await _reportRepository.getDailyReport(reportDate);
@@ -29,7 +39,22 @@ class DailyReportService {
     return report.model == expectedModel ? report.content : null;
   }
 
+  Future<bool> hasFreshReportGeneratedSince(
+    String reportDate,
+    int requestedAtMs,
+  ) async {
+    final report = await _reportRepository.getDailyReport(reportDate);
+    if (report == null ||
+        report.isStale ||
+        report.generatedAtMs <= requestedAtMs) {
+      return false;
+    }
+    final expectedModel = '${await _modelName()}|$promptVersion';
+    return report.model == expectedModel;
+  }
+
   Future<String> generate(String reportDate) async {
+    final cancellationGeneration = _cancellationGeneration;
     final expectedRevision = await _timelineRepository.getTimelineRevision(
       reportDate,
     );
@@ -38,6 +63,11 @@ class DailyReportService {
       throw StateError('当天没有可生成日报的活动卡片');
     }
     final service = await _serviceFactory();
+    if (cancellationGeneration != _cancellationGeneration) {
+      service.close();
+      throw StateError('日报生成已取消');
+    }
+    _activeService = service;
     try {
       final model = await _modelName();
       final report = await service.generateDailyReport(
@@ -52,6 +82,7 @@ class DailyReportService {
       );
       return report;
     } finally {
+      if (identical(_activeService, service)) _activeService = null;
       service.close();
     }
   }

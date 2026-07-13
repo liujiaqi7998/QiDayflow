@@ -64,6 +64,7 @@ class FlutterWindow : public Win32Window {
   bool tray_icon_added_ = false;
   qi_day_flow::ExitLifecycle exit_lifecycle_;
   bool exit_allowed_ = false;
+  bool session_notifications_registered_ = false;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_
