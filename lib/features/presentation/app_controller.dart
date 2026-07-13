@@ -250,21 +250,12 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
   @override
   Future<void> startCapture() {
     if (_captureOperation != null ||
+        _nativeStopWait != null ||
         recordingStatus.isActive ||
         _activeSession != null ||
         _exiting ||
         _disposed) {
       return Future<void>.value();
-    }
-    final nativeStopWait = _nativeStopWait;
-    if (nativeStopWait != null) {
-      return _runCaptureOperation(() async {
-        if (await _reconcileNativeStop(nativeStopWait)) {
-          await _startCapture();
-        } else {
-          _setMessage('原生采集仍在停止，请稍后重试');
-        }
-      });
     }
     return _runCaptureOperation(_startCapture);
   }
@@ -391,14 +382,10 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
     try {
       await _nativeService.stop();
       nativeStopAccepted = true;
-      try {
-        await nativeStopWait.completion.future.timeout(
-          _stopTimeout,
-          onTimeout: () => throw TimeoutException('原生停止确认超时', _stopTimeout),
-        );
-      } on TimeoutException {
-        if (!await _reconcileNativeStop(nativeStopWait)) rethrow;
-      }
+      await nativeStopWait.completion.future.timeout(
+        _stopTimeout,
+        onTimeout: () => throw TimeoutException('原生停止确认超时', _stopTimeout),
+      );
       final nativeStopFailure = nativeStopWait.failure;
       if (nativeStopFailure != null) throw nativeStopFailure;
       await _chunkSaveTail;
@@ -428,20 +415,6 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
     }
     if (_hasApiKey) _analysisCoordinator.schedule();
     await _refreshDerivedData();
-  }
-
-  Future<bool> _reconcileNativeStop(_NativeStopWait wait) async {
-    if (!identical(_nativeStopWait, wait)) return true;
-    try {
-      final state = await _nativeService.getState().timeout(_stopTimeout);
-      final status = state['status'] ?? state['state'];
-      if (status != 'stopped') return false;
-      if (identical(_nativeStopWait, wait)) _nativeStopWait = null;
-      if (!wait.completion.isCompleted) wait.completion.complete();
-      return true;
-    } on Object {
-      return false;
-    }
   }
 
   @override

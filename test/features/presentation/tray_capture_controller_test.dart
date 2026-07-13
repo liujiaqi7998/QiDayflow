@@ -195,7 +195,7 @@ void main() {
     },
   );
 
-  test('native state query clears a timed-out stop tombstone', () async {
+  test('native state query cannot clear a timed-out stop tombstone', () async {
     final harness = await _ControllerHarness.create(
       stopTimeout: const Duration(milliseconds: 50),
     );
@@ -208,7 +208,14 @@ void main() {
     await harness.controller.stopCapture();
     await harness.controller.startCapture();
 
-    expect(harness.native.stateQueries, 1);
+    expect(harness.native.stateQueries, 0);
+    expect(harness.native.startCalls, 1);
+    expect(harness.controller.recordingStatus, RecordingViewStatus.error);
+
+    harness.native.emitState(NativeCaptureStatus.stopped);
+    await _flushEvents();
+    await harness.controller.startCapture();
+
     expect(harness.native.startCalls, 2);
     expect(harness.controller.recordingStatus, RecordingViewStatus.recording);
   });
