@@ -397,6 +397,9 @@ class _SettingsPageState extends State<SettingsPage> {
                         children: [
                           Expanded(
                             child: TextFormField(
+                              key: const ValueKey(
+                                'settings-user-data-directory',
+                              ),
                               controller: _userDataDirectory,
                               enabled: !vm.recordingStatus.isActive,
                               onChanged: (_) {
@@ -452,9 +455,10 @@ class _SettingsPageState extends State<SettingsPage> {
                       Semantics(
                         key: const ValueKey('settings-capture-interval'),
                         container: true,
-                        explicitChildNodes: true,
+                        explicitChildNodes: !captureIntervalLocked,
+                        excludeSemantics: captureIntervalLocked,
                         label: captureIntervalLocked
-                            ? '截图间隔，当前 $_captureIntervalSeconds 秒。录制正在进行，设置已锁定'
+                            ? '截图间隔，当前 $_captureIntervalSeconds 秒。${vm.recordingStatus.label}，设置已锁定'
                             : '截图间隔，当前 $_captureIntervalSeconds 秒',
                         child: LayoutBuilder(
                           builder: (context, constraints) {

@@ -298,7 +298,9 @@ void main() {
       await tester.pumpAndSettle();
 
       final interval = find.byKey(const ValueKey('settings-capture-interval'));
-      expect(tester.getSemantics(interval).label, '截图间隔，当前 10 秒。录制正在进行，设置已锁定');
+      final lockedSemantics = tester.getSemantics(interval);
+      expect(lockedSemantics.label, '截图间隔，当前 10 秒。录制中，设置已锁定');
+      expect(lockedSemantics.hasChildren, isFalse);
       expect(find.text('录制期间截图间隔已锁定，停止录制后可更改。'), findsOneWidget);
       expect(
         tester
@@ -315,6 +317,11 @@ void main() {
       await tester.tap(find.text('20 秒'));
       await tester.pump();
       expect(viewModel.savedSettings, isEmpty);
+
+      viewModel.recordingStatus = RecordingViewStatus.paused;
+      viewModel.notifyListeners();
+      await tester.pump();
+      expect(tester.getSemantics(interval).label, '截图间隔，当前 10 秒。已暂停，设置已锁定');
 
       viewModel.recordingStatus = RecordingViewStatus.stopped;
       viewModel.notifyListeners();
@@ -421,6 +428,7 @@ void main() {
     expect(dropdown.onChanged, isNull);
     expect(find.text('录制期间截图间隔已锁定，停止录制后可更改。'), findsOneWidget);
     expect(viewModel.savedSettings, isEmpty);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('user data directory can be opened while recording', (
@@ -428,12 +436,18 @@ void main() {
   ) async {
     await tester.binding.setSurfaceSize(const Size(1280, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
-    final viewModel = _TestViewModel()
-      ..section = AppSection.settings
-      ..recordingStatus = RecordingViewStatus.recording;
+    final viewModel = _TestViewModel()..section = AppSection.settings;
 
     await tester.pumpWidget(QiDayFlowApp(viewModel: viewModel));
     await tester.pumpAndSettle();
+
+    await tester.enterText(
+      find.byKey(const ValueKey('settings-user-data-directory')),
+      r'  C:\Current QiDayFlow  ',
+    );
+    viewModel.recordingStatus = RecordingViewStatus.recording;
+    viewModel.notifyListeners();
+    await tester.pump();
 
     final openButton = find.byKey(
       const ValueKey('settings-open-user-data-directory'),
@@ -444,7 +458,9 @@ void main() {
 
     await tester.tap(openButton);
     await tester.pumpAndSettle();
-    expect(viewModel.openedUserDataDirectories, <String>[r'C:\QiDayFlow']);
+    expect(viewModel.openedUserDataDirectories, <String>[
+      r'C:\Current QiDayFlow',
+    ]);
   });
 
   testWidgets('user data directory open failure shows a closable snackbar', (

@@ -520,6 +520,19 @@ void main() {
       throwsArgumentError,
     );
   });
+
+  test('directory Explorer request rejects an embedded NUL', () async {
+    final service = NativeCaptureService(
+      methodChannel: const MethodChannel(
+        'qi_day_flow/test/unused-nul-directory',
+      ),
+    );
+
+    await expectLater(
+      service.openDirectoryInExplorer('C:\\QiDayFlow\u0000\\elsewhere'),
+      throwsArgumentError,
+    );
+  });
 }
 
 Map<Object?, Object?> _schema4ChunkEvent({

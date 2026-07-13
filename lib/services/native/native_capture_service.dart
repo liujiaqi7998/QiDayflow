@@ -739,8 +739,12 @@ String _validateExecutablePath(String value) {
 }
 
 String _validateWindowsDirectoryPath(String value) {
-  final path = p.windows.normalize(value.trim());
-  if (path.isEmpty || path.contains('\u0000') || !p.windows.isAbsolute(path)) {
+  final trimmed = value.trim();
+  if (trimmed.isEmpty || trimmed.contains('\u0000')) {
+    throw ArgumentError.value(value, 'directoryPath', '必须是 Windows 绝对目录路径');
+  }
+  final path = p.windows.normalize(trimmed);
+  if (!p.windows.isAbsolute(path)) {
     throw ArgumentError.value(value, 'directoryPath', '必须是 Windows 绝对目录路径');
   }
   return path;

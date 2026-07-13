@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -39,8 +40,18 @@ void main() {
       final messenger =
           TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
       final nativeCalls = <MethodCall>[];
+      Completer<Object?>? protectTextGate;
+      Completer<void>? startCaptureSignal;
       messenger.setMockMethodCallHandler(methodChannel, (call) async {
         nativeCalls.add(call);
+        if (call.method == 'startCapture') {
+          final signal = startCaptureSignal;
+          if (signal != null && !signal.isCompleted) signal.complete();
+        }
+        if (call.method == 'protectSecret') {
+          final gate = protectTextGate;
+          return gate == null ? 'test-ciphertext' : await gate.future;
+        }
         return switch (call.method) {
           'getExecutableIcon' => Uint8List.fromList(<int>[
             0x89,
@@ -306,6 +317,49 @@ void main() {
       expect(
         nextStartCall.arguments,
         containsPair('captureIntervalSeconds', 20),
+      );
+      await controller.stopCapture();
+
+      protectTextGate = Completer<Object?>();
+      final pendingSave = controller.saveSettings(
+        SettingsDraft(
+          apiUrl: controller.settings.apiUrl,
+          apiKey: 'new-test-key',
+          model: controller.settings.model,
+          userDataDirectory: controller.settings.userDataDirectory,
+          cacheLimitGb: controller.settings.cacheLimitGb,
+          idlePauseEnabled: controller.settings.idlePauseEnabled,
+          idleTimeoutMinutes: controller.settings.idleTimeoutMinutes,
+          captureIntervalSeconds: 30,
+          themeMode: controller.settings.themeMode,
+          logLevel: controller.settings.logLevel,
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      final startCountBeforeRace = nativeCalls
+          .where((call) => call.method == 'startCapture')
+          .length;
+      startCaptureSignal = Completer<void>();
+      final pendingStart = controller.startCapture();
+      final startedBeforeSave = await Future.any<bool>(<Future<bool>>[
+        startCaptureSignal.future.then((_) => true),
+        Future<bool>.delayed(const Duration(milliseconds: 50), () => false),
+      ]);
+      expect(startedBeforeSave, isFalse);
+      expect(
+        nativeCalls.where((call) => call.method == 'startCapture'),
+        hasLength(startCountBeforeRace),
+      );
+
+      protectTextGate.complete('new-test-ciphertext');
+      await pendingSave;
+      await pendingStart;
+      final raceStartCall = nativeCalls.lastWhere(
+        (call) => call.method == 'startCapture',
+      );
+      expect(
+        raceStartCall.arguments,
+        containsPair('captureIntervalSeconds', 30),
       );
       await controller.stopCapture();
     },

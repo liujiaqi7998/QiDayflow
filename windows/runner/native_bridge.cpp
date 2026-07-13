@@ -1374,6 +1374,11 @@ void NativeBridge::HandleMethodCall(
       return;
     }
     const std::string& utf8_path = std::get<std::string>(*directory_value);
+    if (utf8_path.find('\0') != std::string::npos) {
+      result->Error("invalid_directory_path",
+                    "Directory path must not contain an embedded NUL");
+      return;
+    }
     const std::wstring wide_path = WideFromUtf8(utf8_path);
     const std::filesystem::path input(wide_path);
     if (wide_path.empty()) {

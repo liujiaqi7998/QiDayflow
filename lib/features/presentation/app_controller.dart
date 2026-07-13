@@ -234,10 +234,11 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
 
   Future<void> _startCapture() async {
     CaptureSession? session;
-    _setRecordingStatus(RecordingViewStatus.starting);
-    recordingDuration = Duration.zero;
-    _safeNotify();
     try {
+      await _waitForPendingSettingsSaves();
+      _setRecordingStatus(RecordingViewStatus.starting);
+      recordingDuration = Duration.zero;
+      _safeNotify();
       await Directory(
         _runtimeSettings.captureDirectory,
       ).create(recursive: true);
@@ -1059,6 +1060,17 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
       onError: (Object _, StackTrace _) {},
     );
     return queued;
+  }
+
+  Future<void> _waitForPendingSettingsSaves() async {
+    while (true) {
+      final pending = _settingsSaveTail;
+      await pending;
+      if (identical(pending, _settingsSaveTail)) break;
+    }
+    if (settingsSaveStatus == SettingsSaveStatus.error) {
+      throw StateError(settingsSaveError ?? '设置保存失败');
+    }
   }
 
   int _beginSettingsSave() {
