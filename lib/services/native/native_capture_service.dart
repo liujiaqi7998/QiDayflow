@@ -661,6 +661,34 @@ class NativeCaptureService {
     throw const FormatException('Explorer 返回值格式无效');
   }
 
+  Future<String?> selectMarkdownExportPath(String suggestedFileName) async {
+    final fileName = suggestedFileName.trim();
+    if (fileName != suggestedFileName ||
+        fileName.isEmpty ||
+        fileName.length > 120 ||
+        p.windows.basename(fileName) != fileName ||
+        p.windows.extension(fileName).toLowerCase() != '.md' ||
+        fileName.contains(RegExp(r'[<>:"/\\|?*\x00-\x1F]'))) {
+      throw ArgumentError.value(
+        suggestedFileName,
+        'suggestedFileName',
+        '必须是安全的 Markdown 文件名',
+      );
+    }
+    final value = await _methods.invokeMethod<Object?>(
+      'selectMarkdownExportPath',
+      <String, Object>{'suggestedFileName': fileName},
+    );
+    if (value == null) return null;
+    if (value is! String ||
+        value.contains('\u0000') ||
+        !p.windows.isAbsolute(value) ||
+        p.windows.extension(value).toLowerCase() != '.md') {
+      throw const FormatException('Markdown 保存路径格式无效');
+    }
+    return value;
+  }
+
   Future<List<NativeExtractedVideoFrame>> extractVideoFrames({
     required String videoPath,
     required String captureRoot,

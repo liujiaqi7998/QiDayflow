@@ -1,18 +1,59 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
 import '../../../core/domain/domain.dart';
 import '../../../core/utils/formatters.dart';
+import '../../../services/native/native_capture_service.dart';
 import '../app_view_model.dart';
 import '../widgets/ui_actions.dart';
 
+typedef CopyMarkdownAction = Future<void> Function(String source);
+typedef ExportMarkdownAction =
+    Future<bool> Function(String source, String suggestedFileName);
+
+Future<void> copyMarkdownToClipboard(String source) =>
+    Clipboard.setData(ClipboardData(text: source));
+
+Future<bool> exportMarkdownToFile(
+  String source,
+  String suggestedFileName,
+) async {
+  final path = await NativeCaptureService().selectMarkdownExportPath(
+    suggestedFileName,
+  );
+  if (path == null) return false;
+  await File(path).writeAsString(source, encoding: utf8, flush: true);
+  return true;
+}
+
+void _showReportMessage(BuildContext context, String message) {
+  final messenger = ScaffoldMessenger.of(context);
+  messenger
+    ..hideCurrentSnackBar()
+    ..showSnackBar(SnackBar(content: Text(message)));
+}
+
 class ReportPage extends StatelessWidget {
-  const ReportPage({super.key, required this.viewModel});
+  const ReportPage({
+    super.key,
+    required this.viewModel,
+    this.copyMarkdown = copyMarkdownToClipboard,
+    this.exportMarkdown = exportMarkdownToFile,
+  });
 
   final QiDayFlowViewModel viewModel;
+  final CopyMarkdownAction copyMarkdown;
+  final ExportMarkdownAction exportMarkdown;
 
   @override
   Widget build(BuildContext context) {
     final report = viewModel.dailyReport;
+    final reportSource = report ?? '';
+    final hasReport = reportSource.isNotEmpty;
     final failedJob = _failedReportJobForDate(
       viewModel.analysisQueue,
       formatIsoDate(viewModel.timelineDate),
@@ -39,8 +80,11 @@ class ReportPage extends StatelessWidget {
                 ),
               ],
             ),
-            Row(
-              mainAxisSize: MainAxisSize.min,
+            Wrap(
+              alignment: WrapAlignment.end,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 8,
+              runSpacing: 8,
               children: [
                 IconButton(
                   onPressed: () => runUiAction(
@@ -64,7 +108,39 @@ class ReportPage extends StatelessWidget {
                   tooltip: '后一天',
                   icon: const Icon(Icons.chevron_right),
                 ),
-                const SizedBox(width: 10),
+                if (hasReport)
+                  Tooltip(
+                    message: '复制 Markdown',
+                    child: OutlinedButton.icon(
+                      key: const ValueKey('report-copy'),
+                      onPressed: () => runUiAction(context, () async {
+                        await copyMarkdown(reportSource);
+                        if (context.mounted) {
+                          _showReportMessage(context, '日报 Markdown 已复制');
+                        }
+                      }),
+                      icon: const Icon(Icons.copy_outlined, size: 18),
+                      label: const Text('一键复制'),
+                    ),
+                  ),
+                if (hasReport)
+                  Tooltip(
+                    message: '导出 Markdown 文件',
+                    child: OutlinedButton.icon(
+                      key: const ValueKey('report-export'),
+                      onPressed: () => runUiAction(context, () async {
+                        final exported = await exportMarkdown(
+                          reportSource,
+                          'QiDayFlow-日报-${formatIsoDate(viewModel.timelineDate)}.md',
+                        );
+                        if (exported && context.mounted) {
+                          _showReportMessage(context, '日报 Markdown 已导出');
+                        }
+                      }),
+                      icon: const Icon(Icons.download_outlined, size: 18),
+                      label: const Text('导出 Markdown'),
+                    ),
+                  ),
                 FilledButton.icon(
                   onPressed: viewModel.reportLoading
                       ? null
@@ -76,7 +152,7 @@ class ReportPage extends StatelessWidget {
                           child: CircularProgressIndicator(strokeWidth: 2),
                         )
                       : const Icon(Icons.refresh),
-                  label: Text(report == null ? '生成日报' : '重新生成'),
+                  label: Text(hasReport ? '重新生成' : '生成日报'),
                 ),
               ],
             ),
@@ -101,11 +177,23 @@ class ReportPage extends StatelessWidget {
         ],
         const SizedBox(height: 18),
         Expanded(
-          child: report == null
+          child: !hasReport
               ? _EmptyReport(loading: viewModel.reportLoading)
               : SingleChildScrollView(
                   padding: const EdgeInsets.fromLTRB(4, 20, 12, 36),
-                  child: _MarkdownDocument(source: report),
+                  child: MarkdownBody(
+                    data: reportSource,
+                    selectable: true,
+                    styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context))
+                        .copyWith(
+                          p: Theme.of(
+                            context,
+                          ).textTheme.bodyLarge?.copyWith(height: 1.7),
+                          listBullet: Theme.of(
+                            context,
+                          ).textTheme.bodyLarge?.copyWith(height: 1.7),
+                        ),
+                  ),
                 ),
         ),
       ],
@@ -223,43 +311,5 @@ class _EmptyReport extends StatelessWidget {
         ],
       ),
     );
-  }
-}
-
-class _MarkdownDocument extends StatelessWidget {
-  const _MarkdownDocument({required this.source});
-
-  final String source;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final spans = <InlineSpan>[];
-    for (final line in source.split('\n')) {
-      final trimmed = line.trimRight();
-      TextStyle? style;
-      var text = trimmed;
-      if (trimmed.startsWith('# ')) {
-        text = trimmed.substring(2);
-        style = theme.textTheme.headlineSmall;
-      } else if (trimmed.startsWith('## ')) {
-        text = trimmed.substring(3);
-        style = theme.textTheme.titleLarge;
-      } else if (trimmed.startsWith('### ')) {
-        text = trimmed.substring(4);
-        style = theme.textTheme.titleMedium;
-      } else if (trimmed.startsWith('- ')) {
-        text = '• ${trimmed.substring(2)}';
-      }
-      spans.add(
-        TextSpan(
-          text: '$text\n',
-          style:
-              style?.copyWith(height: 1.7) ??
-              theme.textTheme.bodyLarge?.copyWith(height: 1.7),
-        ),
-      );
-    }
-    return SelectableText.rich(TextSpan(children: spans));
   }
 }

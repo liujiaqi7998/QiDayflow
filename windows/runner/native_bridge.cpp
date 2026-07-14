@@ -913,6 +913,81 @@ HRESULT PickDirectory(HWND owner,
   return S_OK;
 }
 
+HRESULT PickMarkdownSavePath(HWND owner,
+                             const std::wstring& suggested_file_name,
+                             std::wstring* selected_path) {
+  if (selected_path == nullptr) {
+    return E_POINTER;
+  }
+  selected_path->clear();
+  ComPtr<IFileSaveDialog> dialog;
+  HRESULT result = CoCreateInstance(CLSID_FileSaveDialog, nullptr,
+                                    CLSCTX_INPROC_SERVER,
+                                    IID_PPV_ARGS(dialog.GetAddressOf()));
+  if (FAILED(result)) {
+    return result;
+  }
+  DWORD options = 0;
+  result = dialog->GetOptions(&options);
+  if (FAILED(result)) {
+    return result;
+  }
+  result = dialog->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST |
+                              FOS_OVERWRITEPROMPT | FOS_DONTADDTORECENT);
+  if (FAILED(result)) {
+    return result;
+  }
+  const COMDLG_FILTERSPEC filters[] = {
+      {L"Markdown files", L"*.md"},
+      {L"All files", L"*.*"},
+  };
+  result = dialog->SetFileTypes(static_cast<UINT>(std::size(filters)), filters);
+  if (FAILED(result)) {
+    return result;
+  }
+  static_cast<void>(dialog->SetFileTypeIndex(1));
+  static_cast<void>(dialog->SetDefaultExtension(L"md"));
+  static_cast<void>(dialog->SetTitle(L"Export Qi Day Flow daily report"));
+  static_cast<void>(dialog->SetFileName(suggested_file_name.c_str()));
+
+  result = dialog->Show(owner);
+  if (FAILED(result)) {
+    return result;
+  }
+  ComPtr<IShellItem> item;
+  result = dialog->GetResult(item.GetAddressOf());
+  if (FAILED(result)) {
+    return result;
+  }
+  PWSTR path = nullptr;
+  result = item->GetDisplayName(SIGDN_FILESYSPATH, &path);
+  if (FAILED(result) || path == nullptr) {
+    return FAILED(result) ? result : E_FAIL;
+  }
+  *selected_path = path;
+  CoTaskMemFree(path);
+  return S_OK;
+}
+
+bool IsSafeMarkdownFileName(const std::wstring& file_name) {
+  if (file_name.empty() || file_name.size() > 120 || file_name == L"." ||
+      file_name == L".." || file_name.find_first_of(L"<>:\"/\\|?*") !=
+                                   std::wstring::npos) {
+    return false;
+  }
+  for (const wchar_t character : file_name) {
+    if (character < 0x20) {
+      return false;
+    }
+  }
+  if (file_name.size() < 3) {
+    return false;
+  }
+  std::wstring extension = file_name.substr(file_name.size() - 3);
+  std::transform(extension.begin(), extension.end(), extension.begin(), towlower);
+  return extension == L".md";
+}
+
 bool IsPathWithin(const std::filesystem::path& root,
                   const std::filesystem::path& child) {
   auto root_iterator = root.begin();
@@ -1682,6 +1757,43 @@ void NativeBridge::HandleMethodCall(
     return;
   }
 
+  if (method == "selectMarkdownExportPath") {
+    if (arguments == nullptr) {
+      result->Error("invalid_arguments", "Markdown export arguments are required");
+      return;
+    }
+    const std::string suggested_utf8 =
+        StringValue(arguments, {"suggestedFileName"});
+    if (suggested_utf8.find('\0') != std::string::npos) {
+      result->Error("invalid_markdown_file_name",
+                    "Markdown file name must not contain an embedded NUL");
+      return;
+    }
+    const std::wstring suggested_file_name = WideFromUtf8(suggested_utf8);
+    if (!IsSafeMarkdownFileName(suggested_file_name)) {
+      result->Error("invalid_markdown_file_name",
+                    "Markdown file name is invalid");
+      return;
+    }
+    std::wstring selected;
+    const HRESULT pick_result =
+        PickMarkdownSavePath(window_, suggested_file_name, &selected);
+    if (pick_result == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
+      result->Success(EncodableValue());
+    } else if (FAILED(pick_result)) {
+      result->Error("markdown_export_picker_failed",
+                    "Windows Markdown save dialog failed",
+                    EncodableValue(static_cast<int64_t>(pick_result)));
+    } else if (!std::filesystem::path(selected).is_absolute() ||
+               !IsSafeMarkdownFileName(
+                   std::filesystem::path(selected).filename().wstring())) {
+      result->Error("invalid_markdown_export_path",
+                    "Selected Markdown export path is invalid");
+    } else {
+      result->Success(EncodableValue(Utf8FromWide(selected)));
+    }
+    return;
+  }
   if (method == "selectDirectory") {
     const std::wstring initial_directory =
         WideFromUtf8(StringValue(arguments, {"initialDirectory"}));

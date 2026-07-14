@@ -116,6 +116,39 @@ void main() {
     },
   );
 
+  test('markdown export picker uses a narrow channel contract', () async {
+    const channel = MethodChannel('qi_day_flow/test/markdown-export');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final calls = <MethodCall>[];
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      calls.add(call);
+      return calls.length == 1
+          ? r'C:\Exports\QiDayFlow-日报-2026-07-13.md'
+          : null;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    final service = NativeCaptureService(methodChannel: channel);
+
+    expect(
+      await service.selectMarkdownExportPath('QiDayFlow-日报-2026-07-13.md'),
+      r'C:\Exports\QiDayFlow-日报-2026-07-13.md',
+    );
+    expect(
+      await service.selectMarkdownExportPath('QiDayFlow-日报-2026-07-13.md'),
+      isNull,
+    );
+    expect(calls.first.method, 'selectMarkdownExportPath');
+    expect(calls.first.arguments, <String, Object>{
+      'suggestedFileName': 'QiDayFlow-日报-2026-07-13.md',
+    });
+    await expectLater(
+      service.selectMarkdownExportPath(r'..\unsafe.md'),
+      throwsArgumentError,
+    );
+    expect(calls, hasLength(2));
+  });
+
   test('capture configuration sends an integer capture interval', () {
     const configuration = NativeCaptureConfiguration(
       outputDirectory: r'C:\QiDayFlow\captures',
