@@ -6,119 +6,213 @@ import 'package:http/http.dart' as http;
 import 'package:qi_day_flow/services/update/update_check_service.dart';
 
 void main() {
-  group('stable numeric version comparison', () {
-    test('accepts v prefix, missing patch, and ignores build metadata', () {
-      expect(isNewerStableVersion(current: '1.2.0+7', latest: 'v1.3'), isTrue);
-      expect(
-        isNewerStableVersion(current: '1.2.3', latest: '1.2.3+9'),
-        isFalse,
+  group('UpdateBuildMetadata', () {
+    test('requires a valid build time and a non-empty build tag', () {
+      final metadata = UpdateBuildMetadata.tryParse(
+        buildTimeValue: '2026-07-12T18:00:00+08:00',
+        buildTagValue: ' release/20260712 ',
       );
-      expect(isNewerStableVersion(current: '1.9.9', latest: '2.0.0'), isTrue);
-    });
 
-    test('rejects malformed and prerelease tags', () {
-      expect(isNewerStableVersion(current: '1.2.3', latest: 'latest'), isFalse);
-      expect(
-        isNewerStableVersion(current: '1.2.3', latest: '1.3.0-beta.1'),
-        isFalse,
-      );
-      expect(isNewerStableVersion(current: '1.2.3', latest: '1'), isFalse);
+      expect(metadata, isNotNull);
+      expect(metadata!.buildTime, DateTime.utc(2026, 7, 12, 10));
+      expect(metadata.buildTag, 'release/20260712');
+
+      for (final values in <(String, String)>[
+        ('', 'release/20260712'),
+        ('not-a-date', 'release/20260712'),
+        ('2026-07-12T10:00:00Z', ''),
+        ('2026-07-12T10:00:00Z', '   '),
+      ]) {
+        expect(
+          UpdateBuildMetadata.tryParse(
+            buildTimeValue: values.$1,
+            buildTagValue: values.$2,
+          ),
+          isNull,
+        );
+      }
     });
   });
 
   group('UpdateCheckService', () {
-    test('requests latest release and parses a newer 200 response', () async {
-      final transport = _FakeTransport(
-        response: UpdateHttpResponse(
-          statusCode: 200,
-          body: jsonEncode(<String, Object?>{
-            'tag_name': 'v1.2.3',
-            'name': 'Qi Day Flow 1.2.3',
-            'html_url':
-                'https://github.com/liujiaqi7998/QiDayflow/releases/tag/v1.2.3',
-          }),
-        ),
-      );
+    test(
+      'reports an update from publication time even when currentVersion is numerically larger',
+      () async {
+        final buildTime = DateTime.utc(2026, 7, 12, 10);
+        final transport = _FakeTransport(
+          response: UpdateHttpResponse(
+            statusCode: 200,
+            body: jsonEncode(<String, Object?>{
+              'tag_name': 'nightly_foo',
+              'name': 'Nightly Foo',
+              'html_url':
+                  'https://github.com/liujiaqi7998/QiDayflow/releases/tag/nightly_foo',
+              'published_at': '2026-07-12T10:00:01Z',
+            }),
+          ),
+        );
+        final service = UpdateCheckService(
+          currentVersion: '99.0.0+4',
+          currentBuildTime: buildTime,
+          transport: transport,
+          now: () => DateTime.utc(2026, 7, 13),
+        );
+
+        final result = await service.check();
+
+        expect(transport.uri, UpdateCheckService.latestReleaseApiUri);
+        expect(transport.headers, <String, String>{
+          'Accept': 'application/vnd.github+json',
+          'User-Agent': 'QiDayFlow/99.0.0+4',
+        });
+        expect(transport.timeout, const Duration(seconds: 5));
+        expect(result.currentVersion, '99.0.0+4');
+        expect(result.latestVersion, 'nightly_foo');
+        expect(result.releaseName, 'Nightly Foo');
+        expect(result.releaseUrl.toString(), contains('/tag/nightly_foo'));
+        expect(result.updateAvailable, isTrue);
+        expect(result.error, isNull);
+        expect(result.checkedAt, DateTime.utc(2026, 7, 13));
+      },
+    );
+
+    test(
+      'reports no update when a larger semver was published at or before the build',
+      () async {
+        final buildTime = DateTime.utc(2026, 7, 12, 10);
+        for (final publishedAt in <String>[
+          '2026-07-12T09:59:59Z',
+          '2026-07-12T10:00:00Z',
+        ]) {
+          final service = UpdateCheckService(
+            currentVersion: '1.0.0',
+            currentBuildTime: DateTime.utc(2026, 7, 12, 10),
+            transport: _FakeTransport(
+              response: UpdateHttpResponse(
+                statusCode: 200,
+                body: jsonEncode(<String, Object?>{
+                  'tag_name': 'v99.0.0',
+                  'name': 'Future Version Number',
+                  'html_url': 'https://example.test/release',
+                  'published_at': publishedAt,
+                }),
+              ),
+            ),
+            now: () => buildTime,
+          );
+
+          final result = await service.check();
+
+          expect(result.latestVersion, '99.0.0');
+          expect(result.updateAvailable, isFalse);
+          expect(result.error, isNull);
+        }
+      },
+    );
+
+    test(
+      'normalizes build and release timezone offsets before comparing',
+      () async {
+        final service = UpdateCheckService(
+          currentVersion: '1.0.0',
+          currentBuildTime: DateTime.parse('2026-07-12T18:00:00+08:00'),
+          transport: _FakeTransport(
+            response: const UpdateHttpResponse(
+              statusCode: 200,
+              body:
+                  '{"tag_name":"timezone-build","name":"timezone","html_url":"https://example.test/release","published_at":"2026-07-12T12:00:00+02:00"}',
+            ),
+          ),
+        );
+
+        final result = await service.check();
+
+        expect(result.updateAvailable, isFalse);
+        expect(result.error, isNull);
+      },
+    );
+
+    test('the same build tag never reports its own release as newer', () async {
       final service = UpdateCheckService(
-        currentVersion: '1.1.0+4',
-        transport: transport,
-        now: () => DateTime.utc(2026, 7, 13),
-      );
-
-      final result = await service.check();
-
-      expect(transport.uri, UpdateCheckService.latestReleaseApiUri);
-      expect(transport.headers, <String, String>{
-        'Accept': 'application/vnd.github+json',
-        'User-Agent': 'QiDayFlow/1.1.0+4',
-      });
-      expect(transport.timeout, const Duration(seconds: 5));
-      expect(result.currentVersion, '1.1.0+4');
-      expect(result.latestVersion, '1.2.3');
-      expect(result.releaseName, 'Qi Day Flow 1.2.3');
-      expect(result.releaseUrl.toString(), contains('/releases/tag/v1.2.3'));
-      expect(result.updateAvailable, isTrue);
-      expect(result.error, isNull);
-      expect(result.checkedAt, DateTime.utc(2026, 7, 13));
-    });
-
-    test('reports no update for an equal release', () async {
-      final service = UpdateCheckService(
-        currentVersion: '1.2.0',
+        currentVersion: '1.0.0',
+        currentBuildTime: DateTime.utc(2026, 7, 12, 10),
+        currentBuildTag: ' release/20260712 ',
         transport: _FakeTransport(
           response: const UpdateHttpResponse(
             statusCode: 200,
             body:
-                '{"tag_name":"v1.2","name":"same","html_url":"https://example.test/release"}',
+                '{"tag_name":"release/20260712","name":"same build","html_url":"https://example.test/release","published_at":"2026-07-12T10:05:00Z"}',
           ),
         ),
       );
 
       final result = await service.check();
 
-      expect(result.latestVersion, '1.2.0');
+      expect(result.latestVersion, 'release/20260712');
       expect(result.updateAvailable, isFalse);
       expect(result.error, isNull);
     });
 
-    test('accepts a GitHub release without an optional name', () async {
-      final service = UpdateCheckService(
-        currentVersion: '1.0.0',
-        transport: _FakeTransport(
-          response: const UpdateHttpResponse(
-            statusCode: 200,
-            body:
-                '{"tag_name":"v1.1.0","name":null,"html_url":"https://example.test/release"}',
-          ),
-        ),
-      );
+    test(
+      'uses the arbitrary tag when the release name is null or empty',
+      () async {
+        for (final name in <Object?>[null, '']) {
+          final service = UpdateCheckService(
+            currentVersion: '99.0.0',
+            currentBuildTime: DateTime.utc(2026, 7, 12, 10),
+            transport: _FakeTransport(
+              response: UpdateHttpResponse(
+                statusCode: 200,
+                body: jsonEncode(<String, Object?>{
+                  'tag_name': 'nightly_foo',
+                  'name': name,
+                  'html_url': 'https://example.test/release',
+                  'published_at': '2026-07-12T10:00:01Z',
+                }),
+              ),
+            ),
+            now: () => DateTime.utc(2026, 7, 12, 10),
+          );
 
-      final result = await service.check();
+          final result = await service.check();
 
-      expect(result.updateAvailable, isTrue);
-      expect(result.latestVersion, '1.1.0');
-      expect(result.releaseName, 'v1.1.0');
-      expect(result.error, isNull);
-    });
+          expect(result.updateAvailable, isTrue);
+          expect(result.latestVersion, 'nightly_foo');
+          expect(result.releaseName, 'nightly_foo');
+          expect(result.error, isNull);
+        }
+      },
+    );
 
-    test('uses the tag when GitHub returns an empty release name', () async {
-      final service = UpdateCheckService(
-        currentVersion: '1.0.0',
-        transport: _FakeTransport(
-          response: const UpdateHttpResponse(
-            statusCode: 200,
-            body:
-                '{"tag_name":"v1.1.0","name":"","html_url":"https://github.com/liujiaqi7998/QiDayflow/releases/tag/v1.1.0"}',
-          ),
-        ),
-      );
+    test(
+      'missing or invalid published_at fails without exposing the body',
+      () async {
+        for (final publishedAt in <Object?>[null, '', 'not-a-date']) {
+          final json = <String, Object?>{
+            'tag_name': 'v2.0.0',
+            'name': 'private release name',
+            'html_url': 'https://example.test/release',
+            'published_at': ?publishedAt,
+          };
+          final body = jsonEncode(json);
+          final service = UpdateCheckService(
+            currentVersion: '1.0.0',
+            currentBuildTime: DateTime.utc(2026, 7, 12, 10),
+            transport: _FakeTransport(
+              response: UpdateHttpResponse(statusCode: 200, body: body),
+            ),
+            now: () => DateTime.utc(2026, 7, 12, 10),
+          );
 
-      final result = await service.check();
+          final result = await service.check();
 
-      expect(result.updateAvailable, isTrue);
-      expect(result.releaseName, 'v1.1.0');
-      expect(result.error, isNull);
-    });
+          expect(result.updateAvailable, isFalse);
+          expect(result.latestVersion, isNull);
+          expect(result.error, isNotNull);
+          expect(result.error, isNot(contains('private release name')));
+        }
+      },
+    );
 
     test('turns timeout and network errors into safe failures', () async {
       for (final error in <Object>[
@@ -127,6 +221,7 @@ void main() {
       ]) {
         final service = UpdateCheckService(
           currentVersion: '1.0.0',
+          currentBuildTime: DateTime.utc(2026, 7, 12, 10),
           transport: _FakeTransport(error: error),
         );
 
@@ -144,6 +239,7 @@ void main() {
         for (final statusCode in <int>[404, 403, 429]) {
           final service = UpdateCheckService(
             currentVersion: '1.0.0',
+            currentBuildTime: DateTime.utc(2026, 7, 12, 10),
             transport: _FakeTransport(
               response: UpdateHttpResponse(
                 statusCode: statusCode,
@@ -161,31 +257,38 @@ void main() {
       },
     );
 
-    test('malformed JSON and malformed tags cannot become updates', () async {
-      final responses = <String>[
-        '{bad json',
-        '{"tag_name":"release-next","name":"next","html_url":"https://example.test"}',
-      ];
-      for (final body in responses) {
-        final service = UpdateCheckService(
-          currentVersion: '1.0.0',
-          transport: _FakeTransport(
-            response: UpdateHttpResponse(statusCode: 200, body: body),
-          ),
-        );
+    test(
+      'malformed JSON and missing required fields cannot become updates',
+      () async {
+        final responses = <String>[
+          '{bad json',
+          '{"tag_name":"","name":"next","html_url":"https://example.test","published_at":"2026-07-12T10:00:01Z"}',
+          '{"tag_name":"release-next","name":"next","html_url":"","published_at":"2026-07-12T10:00:01Z"}',
+        ];
+        for (final body in responses) {
+          final service = UpdateCheckService(
+            currentVersion: '1.0.0',
+            currentBuildTime: DateTime.utc(2026, 7, 12, 10),
+            transport: _FakeTransport(
+              response: UpdateHttpResponse(statusCode: 200, body: body),
+            ),
+            now: () => DateTime.utc(2026, 7, 12, 10),
+          );
 
-        final result = await service.check();
+          final result = await service.check();
 
-        expect(result.updateAvailable, isFalse);
-        expect(result.latestVersion, isNull);
-        expect(result.error, isNotNull);
-      }
-    });
+          expect(result.updateAvailable, isFalse);
+          expect(result.latestVersion, isNull);
+          expect(result.error, isNotNull);
+        }
+      },
+    );
 
     test('close releases the injected transport', () {
       final transport = _FakeTransport();
       final service = UpdateCheckService(
         currentVersion: '1.0.0',
+        currentBuildTime: DateTime.utc(2026, 7, 12, 10),
         transport: transport,
       );
 

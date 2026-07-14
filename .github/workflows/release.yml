@@ -46,7 +46,14 @@ jobs:
         run: flutter test --no-pub
 
       - name: Build Windows release
-        run: flutter build windows --release --no-pub
+        shell: pwsh
+        env:
+          QI_DAY_FLOW_BUILD_TAG: ${{ github.ref_name }}
+        run: |
+          $buildTime = [DateTimeOffset]::UtcNow.ToString('o')
+          flutter build windows --release --no-pub `
+            "--dart-define=QI_DAY_FLOW_BUILD_TIME=$buildTime" `
+            "--dart-define=QI_DAY_FLOW_BUILD_TAG=$env:QI_DAY_FLOW_BUILD_TAG"
 
       - name: Build native regression tests
         run: >-

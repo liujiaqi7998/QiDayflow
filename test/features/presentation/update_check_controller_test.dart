@@ -78,7 +78,7 @@ void main() {
         const UpdateHttpResponse(
           statusCode: 200,
           body:
-              '{"tag_name":"v1.1.0","name":"1.1.0","html_url":"https://example.test/untrusted"}',
+              '{"tag_name":"v1.1.0","name":"1.1.0","html_url":"https://example.test/untrusted","published_at":"2026-07-12T10:00:01Z"}',
         ),
       );
       await _waitFor(() => fixture.controller.update.updateAvailable);
@@ -105,7 +105,7 @@ void main() {
       const UpdateHttpResponse(
         statusCode: 200,
         body:
-            '{"tag_name":"v9.0.0","name":"9.0.0","html_url":"https://example.test/release"}',
+            '{"tag_name":"v9.0.0","name":"9.0.0","html_url":"https://example.test/release","published_at":"2026-07-12T10:00:01Z"}',
       ),
     );
     await Future<void>.delayed(const Duration(milliseconds: 20));
@@ -169,6 +169,7 @@ Future<_ControllerFixture> _createFixture(
     activeUserDataDirectory: root.path,
     updateCheckService: UpdateCheckService(
       currentVersion: '1.0.0+2',
+      currentBuildTime: DateTime.utc(2026, 7, 12, 10),
       transport: transport,
     ),
     releasePageOpener: opener ?? (_) async => true,

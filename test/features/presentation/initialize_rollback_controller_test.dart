@@ -47,6 +47,7 @@ void main() {
         logger: logger,
         updateCheckService: UpdateCheckService(
           currentVersion: '1.0.0',
+          currentBuildTime: DateTime.utc(2026, 7, 12, 10),
           transport: transport,
         ),
         initializationStageHook: (stage) async {

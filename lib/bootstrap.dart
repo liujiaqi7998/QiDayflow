@@ -7,6 +7,9 @@ import 'services/logging/app_logger.dart';
 import 'services/secure_settings_service.dart';
 import 'services/update/update_check_service.dart';
 
+const _buildTimeValue = String.fromEnvironment('QI_DAY_FLOW_BUILD_TIME');
+const _buildTagValue = String.fromEnvironment('QI_DAY_FLOW_BUILD_TAG');
+
 Future<AppController> bootstrapApplication() async {
   final defaultPaths = await AppPaths.create();
   final dataDirectoryService = DataDirectoryService(
@@ -24,11 +27,21 @@ Future<AppController> bootstrapApplication() async {
     defaultUserDataDirectory: paths.userDataDirectory,
   );
   UpdateCheckService? updateCheckService;
-  try {
-    final currentVersion = await nativeService.queryApplicationVersion();
-    updateCheckService = UpdateCheckService(currentVersion: currentVersion);
-  } on Object {
-    updateCheckService = null;
+  final buildMetadata = UpdateBuildMetadata.tryParse(
+    buildTimeValue: _buildTimeValue,
+    buildTagValue: _buildTagValue,
+  );
+  if (buildMetadata != null) {
+    try {
+      final currentVersion = await nativeService.queryApplicationVersion();
+      updateCheckService = UpdateCheckService(
+        currentVersion: currentVersion,
+        currentBuildTime: buildMetadata.buildTime,
+        currentBuildTag: buildMetadata.buildTag,
+      );
+    } on Object {
+      updateCheckService = null;
+    }
   }
   final controller = AppController(
     database: database,

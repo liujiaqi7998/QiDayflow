@@ -85,12 +85,35 @@ final class UpdateCheckResult {
   final String? error;
 }
 
+final class UpdateBuildMetadata {
+  const UpdateBuildMetadata({required this.buildTime, required this.buildTag});
+
+  final DateTime buildTime;
+  final String buildTag;
+
+  static UpdateBuildMetadata? tryParse({
+    required String buildTimeValue,
+    required String buildTagValue,
+  }) {
+    final buildTime = DateTime.tryParse(buildTimeValue.trim());
+    final buildTag = buildTagValue.trim();
+    if (buildTime == null || buildTag.isEmpty) return null;
+    return UpdateBuildMetadata(
+      buildTime: buildTime.toUtc(),
+      buildTag: buildTag,
+    );
+  }
+}
+
 final class UpdateCheckService {
   UpdateCheckService({
     required this.currentVersion,
+    required DateTime currentBuildTime,
+    this.currentBuildTag = '',
     UpdateCheckTransport? transport,
     DateTime Function()? now,
-  }) : _transport = transport ?? HttpUpdateCheckTransport(),
+  }) : currentBuildTime = currentBuildTime.toUtc(),
+       _transport = transport ?? HttpUpdateCheckTransport(),
        _now = now ?? DateTime.now;
 
   static final Uri latestReleaseApiUri = Uri.parse(
@@ -102,6 +125,8 @@ final class UpdateCheckService {
   static const Duration requestTimeout = Duration(seconds: 5);
 
   final String currentVersion;
+  final DateTime currentBuildTime;
+  final String currentBuildTag;
   final UpdateCheckTransport _transport;
   final DateTime Function() _now;
 
@@ -124,32 +149,38 @@ final class UpdateCheckService {
       if (decoded is! Map<String, dynamic>) {
         return _failure(checkedAt, '版本信息格式无效，请稍后重试');
       }
-      final tag = decoded['tag_name'];
+      final tagValue = decoded['tag_name'];
       final name = decoded['name'];
-      final htmlUrl = decoded['html_url'];
-      if (tag is! String ||
+      final htmlUrlValue = decoded['html_url'];
+      final publishedAtValue = decoded['published_at'];
+      if (tagValue is! String ||
+          tagValue.trim().isEmpty ||
           (name != null && name is! String) ||
-          htmlUrl is! String) {
+          htmlUrlValue is! String ||
+          htmlUrlValue.trim().isEmpty ||
+          publishedAtValue is! String) {
         return _failure(checkedAt, '版本信息格式无效，请稍后重试');
       }
-      final latest = _StableNumericVersion.tryParse(tag);
-      final current = _StableNumericVersion.tryParse(currentVersion);
-      final releaseUrl = Uri.tryParse(htmlUrl);
-      if (latest == null ||
-          current == null ||
-          releaseUrl == null ||
+      final tag = tagValue.trim();
+      final releaseUrl = Uri.tryParse(htmlUrlValue.trim());
+      final publishedAt = DateTime.tryParse(publishedAtValue.trim());
+      if (releaseUrl == null ||
           !releaseUrl.hasScheme ||
-          releaseUrl.host.isEmpty) {
+          releaseUrl.host.isEmpty ||
+          publishedAt == null) {
         return _failure(checkedAt, '版本信息格式无效，请稍后重试');
       }
+      final buildTag = currentBuildTag.trim();
+      final isSameBuild = buildTag.isNotEmpty && tag == buildTag;
       return UpdateCheckResult(
         currentVersion: currentVersion,
-        latestVersion: latest.normalized,
+        latestVersion: _displayReleaseTag(tag),
         releaseName: name is String && name.trim().isNotEmpty
             ? name.trim()
-            : tag.trim(),
+            : tag,
         releaseUrl: releaseUrl,
-        updateAvailable: latest.compareTo(current) > 0,
+        updateAvailable:
+            !isSameBuild && publishedAt.toUtc().isAfter(currentBuildTime),
         checkedAt: checkedAt,
       );
     } on TimeoutException {
@@ -179,42 +210,14 @@ final class UpdateCheckService {
   void close() => _transport.close();
 }
 
-bool isNewerStableVersion({required String current, required String latest}) {
-  final currentVersion = _StableNumericVersion.tryParse(current);
-  final latestVersion = _StableNumericVersion.tryParse(latest);
-  if (currentVersion == null || latestVersion == null) return false;
-  return latestVersion.compareTo(currentVersion) > 0;
+String _displayReleaseTag(String tag) {
+  if (tag.length > 1 && tag.startsWith('v') && _startsWithAsciiDigit(tag, 1)) {
+    return tag.substring(1);
+  }
+  return tag;
 }
 
-final class _StableNumericVersion implements Comparable<_StableNumericVersion> {
-  const _StableNumericVersion(this.major, this.minor, this.patch);
-
-  static final RegExp _pattern = RegExp(
-    r'^v?(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?(?:\+[0-9A-Za-z.-]+)?$',
-  );
-
-  final int major;
-  final int minor;
-  final int patch;
-
-  String get normalized => '$major.$minor.$patch';
-
-  static _StableNumericVersion? tryParse(String value) {
-    final match = _pattern.firstMatch(value.trim());
-    if (match == null) return null;
-    return _StableNumericVersion(
-      int.parse(match.group(1)!),
-      int.parse(match.group(2)!),
-      int.parse(match.group(3) ?? '0'),
-    );
-  }
-
-  @override
-  int compareTo(_StableNumericVersion other) {
-    final majorComparison = major.compareTo(other.major);
-    if (majorComparison != 0) return majorComparison;
-    final minorComparison = minor.compareTo(other.minor);
-    if (minorComparison != 0) return minorComparison;
-    return patch.compareTo(other.patch);
-  }
+bool _startsWithAsciiDigit(String value, int index) {
+  final codeUnit = value.codeUnitAt(index);
+  return codeUnit >= 0x30 && codeUnit <= 0x39;
 }
