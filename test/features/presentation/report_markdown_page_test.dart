@@ -153,6 +153,55 @@ void main() {
     expect(find.textContaining('无法写入文件'), findsOneWidget);
   });
 
+  testWidgets('report actions are unavailable while another date is loading', (
+    tester,
+  ) async {
+    final viewModel = _ReportViewModel(source)..timelineLoading = true;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ReportPage(
+            viewModel: viewModel,
+            copyMarkdown: (_) async {},
+            exportMarkdown: (_, _) async => false,
+          ),
+        ),
+      ),
+    );
+
+    expect(find.byType(MarkdownBody), findsNothing);
+    expect(find.byTooltip('复制 Markdown'), findsNothing);
+    expect(find.byTooltip('导出 Markdown 文件'), findsNothing);
+  });
+
+  testWidgets('Markdown images never create network or file image providers', (
+    tester,
+  ) async {
+    const imageSource = '''# 图片策略
+
+![http](http://attacker.example/a.png)
+![https](https://attacker.example/b.png)
+![file](file:///C:/secret.png)
+![unc](//server/share/secret.png)
+![data](data:image/png;base64,AAAA)
+''';
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ReportPage(
+            viewModel: _ReportViewModel(imageSource),
+            copyMarkdown: (_) async {},
+            exportMarkdown: (_, _) async => false,
+          ),
+        ),
+      ),
+    );
+
+    expect(find.byType(Image), findsNothing);
+    expect(find.byIcon(Icons.image_not_supported_outlined), findsNWidgets(5));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('report actions do not overflow at narrow width', (tester) async {
     await tester.binding.setSurfaceSize(const Size(240, 640));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -183,6 +232,9 @@ final class _ReportViewModel implements QiDayFlowViewModel {
 
   @override
   DateTime timelineDate = DateTime(2026, 7, 10);
+
+  @override
+  bool timelineLoading = false;
 
   @override
   bool reportLoading = false;

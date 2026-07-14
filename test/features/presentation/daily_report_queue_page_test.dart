@@ -133,6 +133,8 @@ final class _PageViewModel extends ChangeNotifier
   @override
   String? dailyReport;
   @override
+  bool timelineLoading = false;
+  @override
   bool reportLoading;
   @override
   AnalysisQueueViewData analysisQueue;

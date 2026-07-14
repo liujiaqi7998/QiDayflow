@@ -53,7 +53,7 @@ class ReportPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final report = viewModel.dailyReport;
     final reportSource = report ?? '';
-    final hasReport = reportSource.isNotEmpty;
+    final hasReport = reportSource.isNotEmpty && !viewModel.timelineLoading;
     final failedJob = _failedReportJobForDate(
       viewModel.analysisQueue,
       formatIsoDate(viewModel.timelineDate),
@@ -184,6 +184,7 @@ class ReportPage extends StatelessWidget {
                   child: MarkdownBody(
                     data: reportSource,
                     selectable: true,
+                    imageBuilder: _buildBlockedMarkdownImage,
                     styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context))
                         .copyWith(
                           p: Theme.of(
@@ -201,7 +202,15 @@ class ReportPage extends StatelessWidget {
   }
 }
 
-class _ReportQueueBanner extends StatelessWidget {
+Widget _buildBlockedMarkdownImage(Uri uri, String? title, String? alt) {
+  final description = (alt?.trim().isNotEmpty ?? false) ? alt!.trim() : '图片';
+  return Tooltip(
+    message: '已阻止加载外部图片：$description',
+    child: const Icon(Icons.image_not_supported_outlined, size: 20),
+  );
+}
+
+final class _ReportQueueBanner extends StatelessWidget {
   const _ReportQueueBanner({
     required this.message,
     required this.loading,

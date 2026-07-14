@@ -539,6 +539,8 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
     final now = _now();
     final today = DateTime(now.year, now.month, now.day);
     timelineDate = normalized.isAfter(today) ? today : normalized;
+    dailyReport = null;
+    _safeNotify();
     await Future.wait([_refreshTimeline(), _loadReport()]);
   }
 

@@ -151,6 +151,22 @@ void main() {
     );
   });
 
+  test('date change clears the previous report before async loading', () async {
+    reportService.loaded['2026-07-13'] = '旧日期日报';
+    await controller.initialize();
+    controller.selectSection(AppSection.report);
+    await _waitUntil(() => controller.dailyReport == '旧日期日报');
+    final newLoad = reportService.blockLoad('2026-07-12');
+
+    final dateChange = controller.setTimelineDate(DateTime(2026, 7, 12));
+
+    expect(controller.timelineDate, DateTime(2026, 7, 12));
+    expect(controller.dailyReport, isNull);
+    newLoad.complete('新日期日报');
+    await dateChange;
+    expect(controller.dailyReport, '新日期日报');
+  });
+
   test('late report load cannot overwrite a newly selected date', () async {
     final oldLoad = reportService.blockLoad('2026-07-13');
     final newLoad = reportService.blockLoad('2026-07-12');
