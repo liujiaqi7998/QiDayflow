@@ -1,7 +1,7 @@
 name: qi_day_flow
 description: "Windows 本地优先的 AI 屏幕活动时间流。"
 publish_to: "none"
-version: 0.1.0+1
+version: 0.1.4
 
 environment:
   sdk: ^3.12.2
