@@ -85,6 +85,29 @@ void main() {
     expect(find.text('日报 Markdown 已复制'), findsOneWidget);
   });
 
+  testWidgets('empty-day success text is shown on the report page', (
+    tester,
+  ) async {
+    const emptyDayContent = '当日暂无可生成日报的活动';
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ReportPage(
+            viewModel: _ReportViewModel(emptyDayContent),
+            copyMarkdown: (_) async {},
+            exportMarkdown: (_, _) async => false,
+          ),
+        ),
+      ),
+    );
+
+    expect(
+      tester.widget<MarkdownBody>(find.byType(MarkdownBody)).data,
+      emptyDayContent,
+    );
+    expect(find.text(emptyDayContent), findsOneWidget);
+  });
+
   testWidgets('report exports with a safe date-based Markdown filename', (
     tester,
   ) async {

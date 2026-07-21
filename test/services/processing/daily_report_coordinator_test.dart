@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 import 'package:qi_day_flow/core/domain/domain.dart';
 import 'package:qi_day_flow/data/data.dart';
 import 'package:qi_day_flow/services/processing/analysis_coordinator.dart';
+import 'package:qi_day_flow/services/reports/daily_report_service.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 void main() {
@@ -47,6 +48,46 @@ void main() {
       reportIsFresh: reportIsFresh ?? (_) async => false,
     );
   }
+
+  test('report-only scheduling leaves pending chunks untouched', () async {
+    final session = await repository.createSession(
+      CaptureSession(
+        captureScope: 'active-window-display',
+        captureDirectory: temporaryDirectory.path,
+        startedAtMs: 1000,
+        createdAtMs: 1000,
+        updatedAtMs: 1000,
+      ),
+    );
+    final chunk = await repository.addChunk(
+      CaptureChunk(
+        sessionId: session.id!,
+        framesDirectory: p.join(temporaryDirectory.path, 'pending-frames'),
+        metadataPath: p.join(temporaryDirectory.path, 'pending.json'),
+        videoPath: p.join(temporaryDirectory.path, 'pending.mp4'),
+        startedAtMs: 1000,
+        endedAtMs: 2000,
+        frameCount: 1,
+        createdAtMs: 1000,
+        updatedAtMs: 1000,
+      ),
+    );
+    await repository.enqueueDailyReportJob('2026-07-13');
+    var generationCalls = 0;
+    final worker = coordinator(reportGenerator: (_) async => generationCalls++);
+
+    worker.scheduleDailyReportsOnly();
+    await _waitUntil(
+      () async => await repository.getDailyReportJob('2026-07-13') == null,
+    );
+    await worker.stop();
+
+    expect(generationCalls, 1);
+    expect(
+      (await repository.getChunk(chunk.id!))?.status,
+      ProcessingStatus.pending,
+    );
+  });
 
   test(
     'report job runs in background and success clears active state',
@@ -318,6 +359,71 @@ void main() {
     await reportRan.future.timeout(const Duration(seconds: 2));
     await worker.stop();
   });
+
+  test('single report retry runs only the selected failed date', () async {
+    for (final date in <String>['2026-07-13', '2026-07-14']) {
+      await repository.enqueueDailyReportJob(date);
+      final claimed = await repository.claimNextDailyReportJob();
+      expect(claimed?.reportDate, date);
+      await repository.markDailyReportJobFailed(
+        date,
+        category: 'provider',
+        summary: 'temporary failure',
+      );
+    }
+    final generatedDates = <String>[];
+    final worker = coordinator(
+      reportGenerator: (date) async => generatedDates.add(date),
+    );
+
+    expect(
+      await worker.retryFailedItem(chunkId: null, reportDate: '2026-07-14'),
+      isTrue,
+    );
+    await _waitUntil(
+      () async => await repository.getDailyReportJob('2026-07-14') == null,
+    );
+    await worker.stop();
+
+    expect(generatedDates, <String>['2026-07-14']);
+    expect(
+      (await repository.getDailyReportJob('2026-07-13'))?.status,
+      DailyReportJobStatus.failed,
+    );
+  });
+
+  test('empty day report job completes successfully without AI', () async {
+    var factoryCalls = 0;
+    final reports = DailyReportService(
+      timelineRepository: repository,
+      reportRepository: repository,
+      serviceFactory: () async {
+        factoryCalls++;
+        throw StateError('AI factory must not be called');
+      },
+      modelName: () async => 'test-model',
+    );
+    final worker = coordinator(
+      reportGenerator: (date) async => reports.generate(date),
+      reportIsFresh: (job) => reports.hasFreshReportGeneratedSince(
+        job.reportDate,
+        job.requestedAtMs,
+      ),
+    );
+    await repository.enqueueDailyReportJob('2026-07-13');
+
+    worker.schedule();
+    await _waitUntil(
+      () async => await repository.getDailyReportJob('2026-07-13') == null,
+    );
+    await worker.stop();
+
+    expect(factoryCalls, 0);
+    expect(
+      (await repository.getDailyReport('2026-07-13'))?.content,
+      '当日暂无可生成日报的活动',
+    );
+  });
 }
 
 final class _GatedDailyReportJobRepository implements DailyReportJobRepository {
@@ -372,6 +478,14 @@ final class _GatedDailyReportJobRepository implements DailyReportJobRepository {
   @override
   Future<int> retryFailedDailyReportJobs() =>
       delegate.retryFailedDailyReportJobs();
+
+  @override
+  Future<bool> retryFailedDailyReportJob(String reportDate) =>
+      delegate.retryFailedDailyReportJob(reportDate);
+
+  @override
+  Future<bool> deleteFailedDailyReportJob(String reportDate) =>
+      delegate.deleteFailedDailyReportJob(reportDate);
 }
 
 Future<void> _waitUntil(Future<bool> Function() condition) async {

@@ -58,6 +58,7 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
     analysisServiceBuilder,
     DailyReportService? dailyReportService,
     AppInitializationStageHook? initializationStageHook,
+    EvidenceStore? evidenceStore,
   }) : _database = database,
        _repository = repository,
        _nativeService = nativeService,
@@ -84,7 +85,8 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
            analysisServiceBuilder ?? _defaultAnalysisServiceBuilder,
        _injectedDailyReportService = dailyReportService,
        _initializationStageHook = initializationStageHook,
-       _evidenceStore = EvidenceStore(nativeService: nativeService) {
+       _evidenceStore =
+           evidenceStore ?? EvidenceStore(nativeService: nativeService) {
     if (maintenanceInterval <= Duration.zero) {
       throw ArgumentError.value(
         maintenanceInterval,
@@ -141,6 +143,7 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
   Future<void> _chunkSaveTail = Future<void>.value();
   Future<void> _settingsSaveTail = Future<void>.value();
   Future<void> _trayStateTail = Future<void>.value();
+  Future<void> _analysisQueueMutationTail = Future<void>.value();
   Future<void>? _captureOperation;
   _NativeStopWait? _nativeStopWait;
   int _captureGeneration = 0;
@@ -298,7 +301,11 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
       await _runInitializationHook(AppInitializationStage.beforeDerivedRefresh);
       await _rotateCache();
       await _refreshDerivedData();
-      if (_hasApiKey) _analysisCoordinator.schedule();
+      if (_hasApiKey) {
+        _analysisCoordinator.schedule();
+      } else {
+        _analysisCoordinator.scheduleDailyReportsOnly();
+      }
       if (recovery.sessionsFailed + recovery.chunksFailed > 0) {
         _setMessage('已恢复上次中断的采集与分析任务，原始证据保持不变');
       } else if (recoveredReportJobs > 0) {
@@ -601,19 +608,26 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
 
   @override
   Future<void> generateDailyReport() async {
-    if (!_hasApiKey) {
-      section = AppSection.settings;
-      _setMessage('生成日报前需要配置 API 密钥');
-      return;
-    }
     final reportDate = formatIsoDate(timelineDate);
+    if (!_hasApiKey) {
+      final cards = await _repository.listCardsForReportDate(reportDate);
+      if (cards.isNotEmpty) {
+        section = AppSection.settings;
+        _setMessage('生成日报前需要配置 API 密钥');
+        return;
+      }
+    }
     try {
       final job = await _repository.enqueueDailyReportJob(reportDate);
       if (formatIsoDate(timelineDate) == reportDate) {
         reportLoading = job.status != DailyReportJobStatus.failed;
         _safeNotify();
       }
-      _analysisCoordinator.schedule();
+      if (_hasApiKey) {
+        _analysisCoordinator.schedule();
+      } else {
+        _analysisCoordinator.scheduleDailyReportsOnly();
+      }
       unawaited(refreshAnalysisQueue());
     } on Object catch (error) {
       _setMessage('日报任务入队失败：${error.runtimeType}');
@@ -881,7 +895,88 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
   }
 
   @override
-  Future<void> retryFailedChunks() => _analysisCoordinator.retryFailed();
+  Future<void> retryFailedChunks() {
+    return _serializeAnalysisQueueMutation(_analysisCoordinator.retryFailed);
+  }
+
+  @override
+  Future<bool> retryAnalysisQueueItem(AnalysisQueueItemViewData item) {
+    return _serializeAnalysisQueueMutation(() {
+      if (item.status != ProcessingStatus.failed) {
+        return Future<bool>.value(false);
+      }
+      return _analysisCoordinator.retryFailedItem(
+        chunkId: item.chunkId,
+        batchId: item.batchId,
+        reportDate: item.reportDate,
+      );
+    });
+  }
+
+  @override
+  Future<bool> deleteAnalysisQueueItem(AnalysisQueueItemViewData item) {
+    return _serializeAnalysisQueueMutation(
+      () => _deleteAnalysisQueueItem(item),
+    );
+  }
+
+  Future<bool> _deleteAnalysisQueueItem(AnalysisQueueItemViewData item) async {
+    if (item.status != ProcessingStatus.failed) return false;
+    final reportDate = item.reportDate;
+    if (reportDate != null) {
+      return _repository.deleteFailedDailyReportJob(reportDate);
+    }
+    final batchId = item.batchId;
+    if (batchId != null) {
+      final batch = await _repository.getBatch(batchId);
+      if (batch == null || batch.status != ProcessingStatus.failed) {
+        return false;
+      }
+      final chunks = await Future.wait(
+        batch.chunkIds.map(_repository.getChunk),
+      );
+      if (chunks.any(
+            (chunk) => chunk == null || chunk.status != ProcessingStatus.failed,
+          ) ||
+          !await _deleteEvidence(chunks.whereType<CaptureChunk>())) {
+        return false;
+      }
+      return _repository.deleteFailedBatch(batchId);
+    }
+    final chunkId = item.chunkId;
+    if (chunkId == null) return false;
+    final chunk = await _repository.getChunk(chunkId);
+    if (chunk == null || chunk.status != ProcessingStatus.failed) return false;
+    if (!await _deleteEvidence(<CaptureChunk>[chunk])) return false;
+    return _repository.deleteFailedChunk(chunkId);
+  }
+
+  Future<bool> _deleteEvidence(Iterable<CaptureChunk> chunks) async {
+    final captureRoot = p.windows.join(_activeUserDataDirectory, 'captures');
+    for (final chunk in chunks) {
+      final result = await _evidenceStore.deleteEvidenceGroup(
+        chunk: chunk,
+        allowedCaptureRoot: captureRoot,
+      );
+      if (!result.deleted) {
+        _setMessage('删除失败：证据文件未能安全清理，任务已保留');
+        return false;
+      }
+    }
+    return true;
+  }
+
+  Future<T> _serializeAnalysisQueueMutation<T>(Future<T> Function() mutation) {
+    final result = Completer<T>();
+    _analysisQueueMutationTail = _analysisQueueMutationTail.then((_) async {
+      try {
+        result.complete(await mutation());
+      } on Object catch (error, stackTrace) {
+        result.completeError(error, stackTrace);
+      }
+    });
+    return result.future;
+  }
 
   @override
   Future<void> exitApplication() async {
@@ -1727,6 +1822,7 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
       }
     }
 
+    await attempt(() async => _analysisQueueMutationTail);
     if (_analysisCoordinatorInitialized) {
       _analysisCoordinatorInitialized = false;
       _dailyReportService.cancelActiveGeneration();

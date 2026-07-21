@@ -630,6 +630,132 @@ final class SqliteDayFlowRepository
   }
 
   @override
+  Future<AnalysisBatch?> retryStandaloneFailedChunk(int chunkId) async {
+    final now = clock.nowUtcEpochMs();
+    final batchId = await database.transaction((transaction) async {
+      final chunkRows = await transaction.rawQuery(
+        '''
+        SELECT id
+        FROM capture_chunks AS chunks
+        WHERE id = ? AND status = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM analysis_batch_chunks AS links
+            WHERE links.chunk_id = chunks.id
+          )
+        ''',
+        <Object?>[chunkId, ProcessingStatus.failed.name],
+      );
+      if (chunkRows.length != 1) return null;
+      final id = await transaction.insert('analysis_batches', <String, Object?>{
+        'status': ProcessingStatus.processing.name,
+        'retry_count': 0,
+        'processing_started_at_ms': now,
+        'created_at_ms': now,
+        'updated_at_ms': now,
+      });
+      final updated = await transaction.update(
+        'capture_chunks',
+        <String, Object?>{
+          'status': ProcessingStatus.processing.name,
+          'next_retry_at_ms': null,
+          'error_message': null,
+          'processing_started_at_ms': now,
+          'completed_at_ms': null,
+          'updated_at_ms': now,
+        },
+        where: 'id = ? AND status = ?',
+        whereArgs: <Object?>[chunkId, ProcessingStatus.failed.name],
+      );
+      if (updated != 1) {
+        throw StateError('Failed chunk state changed during retry');
+      }
+      await transaction.insert('analysis_batch_chunks', <String, Object?>{
+        'batch_id': id,
+        'chunk_id': chunkId,
+        'ordinal': 0,
+      });
+      return id;
+    });
+    return batchId == null ? null : getBatch(batchId);
+  }
+
+  @override
+  Future<bool> deleteFailedBatch(int batchId) {
+    return database.transaction((transaction) async {
+      final batchRows = await transaction.query(
+        'analysis_batches',
+        columns: const <String>['status'],
+        where: 'id = ?',
+        whereArgs: <Object?>[batchId],
+        limit: 1,
+      );
+      if (batchRows.isEmpty ||
+          batchRows.single['status'] != ProcessingStatus.failed.name) {
+        return false;
+      }
+      final chunkRows = await transaction.rawQuery(
+        '''
+        SELECT c.id, c.status
+        FROM capture_chunks AS c
+        JOIN analysis_batch_chunks AS bc ON bc.chunk_id = c.id
+        WHERE bc.batch_id = ?
+        ORDER BY bc.ordinal ASC
+        ''',
+        <Object?>[batchId],
+      );
+      if (chunkRows.isEmpty ||
+          chunkRows.any(
+            (row) => row['status'] != ProcessingStatus.failed.name,
+          )) {
+        return false;
+      }
+      final chunkIds = chunkRows
+          .map((row) => row['id']! as int)
+          .toList(growable: false);
+      await transaction.delete(
+        'analysis_batch_chunks',
+        where: 'batch_id = ?',
+        whereArgs: <Object?>[batchId],
+      );
+      final batchDeleted = await transaction.delete(
+        'analysis_batches',
+        where: 'id = ? AND status = ?',
+        whereArgs: <Object?>[batchId, ProcessingStatus.failed.name],
+      );
+      if (batchDeleted != 1) {
+        throw StateError('Failed batch state changed during deletion');
+      }
+      final chunksDeleted = await transaction.delete(
+        'capture_chunks',
+        where:
+            'id IN (${_placeholders(chunkIds.length)}) AND status = ? '
+            'AND NOT EXISTS ('
+            'SELECT 1 FROM analysis_batch_chunks AS links '
+            'WHERE links.chunk_id = capture_chunks.id)',
+        whereArgs: <Object?>[...chunkIds, ProcessingStatus.failed.name],
+      );
+      if (chunksDeleted != chunkIds.length) {
+        throw StateError('Failed batch chunks changed during deletion');
+      }
+      return true;
+    });
+  }
+
+  @override
+  Future<bool> deleteFailedChunk(int chunkId) async {
+    final db = await database.open();
+    return await db.delete(
+          'capture_chunks',
+          where:
+              'id = ? AND status = ? AND NOT EXISTS ('
+              'SELECT 1 FROM analysis_batch_chunks AS links '
+              'WHERE links.chunk_id = capture_chunks.id)',
+          whereArgs: <Object?>[chunkId, ProcessingStatus.failed.name],
+        ) ==
+        1;
+  }
+
+  @override
   Future<AnalysisCommitResult> completeAnalysis({
     required int batchId,
     required List<Observation> observations,
@@ -1259,6 +1385,42 @@ final class SqliteDayFlowRepository
       where: 'status = ?',
       whereArgs: <Object?>[DailyReportJobStatus.failed.name],
     );
+  }
+
+  @override
+  Future<bool> retryFailedDailyReportJob(String reportDate) async {
+    final db = await database.open();
+    final now = clock.nowUtcEpochMs();
+    return await db.update(
+          'daily_report_jobs',
+          <String, Object?>{
+            'status': DailyReportJobStatus.processing.name,
+            'error_category': null,
+            'error_summary': null,
+            'updated_at_ms': now,
+            'processing_started_at_ms': now,
+          },
+          where: 'report_date = ? AND status = ?',
+          whereArgs: <Object?>[
+            requireReportDate(reportDate),
+            DailyReportJobStatus.failed.name,
+          ],
+        ) ==
+        1;
+  }
+
+  @override
+  Future<bool> deleteFailedDailyReportJob(String reportDate) async {
+    final db = await database.open();
+    return await db.delete(
+          'daily_report_jobs',
+          where: 'report_date = ? AND status = ?',
+          whereArgs: <Object?>[
+            requireReportDate(reportDate),
+            DailyReportJobStatus.failed.name,
+          ],
+        ) ==
+        1;
   }
 
   @override

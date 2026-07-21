@@ -9,6 +9,7 @@ import 'package:qi_day_flow/app.dart';
 import 'package:qi_day_flow/core/domain/domain.dart';
 import 'package:qi_day_flow/features/presentation/app_theme.dart';
 import 'package:qi_day_flow/features/presentation/app_view_model.dart';
+import 'package:qi_day_flow/features/presentation/pages/analysis_queue_page.dart';
 import 'package:qi_day_flow/features/presentation/pages/settings_page.dart';
 
 void main() {
@@ -322,6 +323,116 @@ void main() {
     await tester.pumpAndSettle();
     expect(viewModel.analysisQueueRefreshCalls, 2);
     expect(tester.widget<FilledButton>(retry).onPressed, isNotNull);
+  });
+
+  testWidgets('failed item actions confirm, refresh, and fit at 240 pixels', (
+    WidgetTester tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(240, 700));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final actionGate = Completer<void>();
+    final viewModel = _TestViewModel()
+      ..analysisQueue = AnalysisQueueViewData(
+        items: <AnalysisQueueItemViewData>[
+          _queueItem(
+            chunkId: 3,
+            batchId: 9,
+            status: ProcessingStatus.failed,
+            errorSummary: '网络连接失败',
+          ),
+          _queueItem(chunkId: 4, status: ProcessingStatus.pending),
+        ],
+      )
+      ..itemActionGate = actionGate;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: AnalysisQueuePage(viewModel: viewModel)),
+      ),
+    );
+    await tester.pump();
+
+    final failed = find.byKey(const ValueKey('analysis-queue-item-chunk-3'));
+    final pending = find.byKey(const ValueKey('analysis-queue-item-chunk-4'));
+    final retry = find.byKey(
+      const ValueKey('analysis-queue-item-retry-chunk-3'),
+    );
+    final delete = find.byKey(
+      const ValueKey('analysis-queue-item-delete-chunk-3'),
+    );
+    expect(find.descendant(of: failed, matching: retry), findsOneWidget);
+    expect(find.descendant(of: failed, matching: delete), findsOneWidget);
+    expect(
+      find.descendant(of: pending, matching: find.text('重试')),
+      findsNothing,
+    );
+    expect(
+      find.descendant(of: pending, matching: find.text('删除')),
+      findsNothing,
+    );
+
+    await tester.ensureVisible(retry);
+    await tester.tap(retry);
+    await tester.pump();
+    expect(viewModel.retriedItemIds, <String>['chunk-3']);
+    await tester.tap(retry);
+    await tester.pump();
+    expect(viewModel.retriedItemIds, <String>['chunk-3']);
+    actionGate.complete();
+    await tester.pumpAndSettle();
+    expect(viewModel.analysisQueueRefreshCalls, 1);
+
+    await tester.tap(delete);
+    await tester.pumpAndSettle();
+    expect(find.text('确认删除失败任务？'), findsOneWidget);
+    expect(find.text('此操作会删除该失败批次的全部切片任务及其受管理的录制证据，且无法撤销。'), findsOneWidget);
+    expect(viewModel.deletedItemIds, isEmpty);
+    await tester.tap(find.widgetWithText(FilledButton, '删除'));
+    await tester.pumpAndSettle();
+    expect(viewModel.deletedItemIds, <String>['chunk-3']);
+    expect(viewModel.analysisQueueRefreshCalls, 2);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('failed rows from the same batch share one busy scope', (
+    WidgetTester tester,
+  ) async {
+    final actionGate = Completer<void>();
+    addTearDown(() {
+      if (!actionGate.isCompleted) actionGate.complete();
+    });
+    final viewModel = _TestViewModel()
+      ..analysisQueue = AnalysisQueueViewData(
+        items: <AnalysisQueueItemViewData>[
+          _queueItem(chunkId: 3, batchId: 9, status: ProcessingStatus.failed),
+          _queueItem(chunkId: 5, batchId: 9, status: ProcessingStatus.failed),
+        ],
+      )
+      ..itemActionGate = actionGate;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: AnalysisQueuePage(viewModel: viewModel)),
+      ),
+    );
+
+    final firstRetry = find.byKey(
+      const ValueKey('analysis-queue-item-retry-chunk-3'),
+    );
+    final secondRetry = find.byKey(
+      const ValueKey('analysis-queue-item-retry-chunk-5'),
+    );
+    final secondDelete = find.byKey(
+      const ValueKey('analysis-queue-item-delete-chunk-5'),
+    );
+    await tester.tap(firstRetry);
+    await tester.pump();
+
+    expect(tester.widget<OutlinedButton>(secondRetry).onPressed, isNull);
+    expect(tester.widget<TextButton>(secondDelete).onPressed, isNull);
+
+    actionGate.complete();
+    await tester.pumpAndSettle();
   });
 
   testWidgets(
@@ -1984,6 +2095,9 @@ final class _TestViewModel extends ChangeNotifier
   int testConnectionCalls = 0;
   Completer<void>? refreshGate;
   Completer<void>? retryGate;
+  Completer<void>? itemActionGate;
+  final List<String> retriedItemIds = <String>[];
+  final List<String> deletedItemIds = <String>[];
 
   @override
   AppSection section = AppSection.timeline;
@@ -2197,6 +2311,19 @@ final class _TestViewModel extends ChangeNotifier
   Future<void> retryFailedChunks() async {
     retryFailedCalls++;
     await retryGate?.future;
+  }
+
+  @override
+  Future<bool> retryAnalysisQueueItem(AnalysisQueueItemViewData item) async {
+    retriedItemIds.add(item.id);
+    await itemActionGate?.future;
+    return true;
+  }
+
+  @override
+  Future<bool> deleteAnalysisQueueItem(AnalysisQueueItemViewData item) async {
+    deletedItemIds.add(item.id);
+    return true;
   }
 
   @override

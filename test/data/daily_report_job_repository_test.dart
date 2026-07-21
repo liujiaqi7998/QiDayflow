@@ -139,4 +139,49 @@ void main() {
     expect(await repository.completeDailyReportJob('2026-07-13'), isTrue);
     expect(await repository.getDailyReportJob('2026-07-13'), isNull);
   });
+
+  test(
+    'single daily report retry and delete are scoped and failed-only',
+    () async {
+      for (final date in <String>['2026-07-13', '2026-07-14']) {
+        await repository.enqueueDailyReportJob(date);
+        await repository.claimNextDailyReportJob();
+        await repository.markDailyReportJobFailed(
+          date,
+          category: 'provider',
+          summary: 'temporary failure',
+        );
+      }
+      await repository.enqueueDailyReportJob('2026-07-15');
+
+      expect(await repository.retryFailedDailyReportJob('2026-07-13'), isTrue);
+      expect(await repository.retryFailedDailyReportJob('2026-07-13'), isFalse);
+      expect(
+        (await repository.getDailyReportJob('2026-07-13'))?.status,
+        DailyReportJobStatus.processing,
+      );
+      expect(
+        (await repository.getDailyReportJob('2026-07-14'))?.status,
+        DailyReportJobStatus.failed,
+      );
+      expect(
+        await repository.deleteFailedDailyReportJob('2026-07-13'),
+        isFalse,
+      );
+      expect(
+        await repository.deleteFailedDailyReportJob('2026-07-15'),
+        isFalse,
+      );
+      expect(await repository.deleteFailedDailyReportJob('2026-07-14'), isTrue);
+      expect(
+        await repository.deleteFailedDailyReportJob('2026-07-14'),
+        isFalse,
+      );
+      expect(await repository.getDailyReportJob('2026-07-14'), isNull);
+      expect(
+        (await repository.getDailyReportJob('2026-07-15'))?.status,
+        DailyReportJobStatus.pending,
+      );
+    },
+  );
 }

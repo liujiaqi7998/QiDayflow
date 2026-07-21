@@ -17,6 +17,7 @@ class AnalysisQueuePage extends StatefulWidget {
 class _AnalysisQueuePageState extends State<AnalysisQueuePage> {
   bool _refreshing = false;
   bool _retrying = false;
+  final Set<String> _busyItemIds = <String>{};
 
   Future<void> _refresh() async {
     if (_refreshing || _retrying) return;
@@ -39,6 +40,56 @@ class _AnalysisQueuePageState extends State<AnalysisQueuePage> {
     } finally {
       if (mounted) setState(() => _retrying = false);
     }
+  }
+
+  Future<void> _runItemAction(
+    AnalysisQueueItemViewData item,
+    Future<bool> Function() action,
+  ) async {
+    if (_busyItemIds.contains(item.actionScopeId)) return;
+    setState(() => _busyItemIds.add(item.actionScopeId));
+    try {
+      await runUiAction(context, () async {
+        await action();
+        await widget.viewModel.refreshAnalysisQueue();
+      });
+    } finally {
+      if (mounted) {
+        setState(() => _busyItemIds.remove(item.actionScopeId));
+      }
+    }
+  }
+
+  Future<void> _deleteItem(AnalysisQueueItemViewData item) async {
+    if (_busyItemIds.contains(item.actionScopeId)) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('确认删除失败任务？'),
+        content: Text(
+          item.reportDate != null
+              ? '此操作只删除当前失败日报任务，且无法撤销。'
+              : item.batchId == null
+              ? '此操作会删除当前失败任务及其受管理的录制证据，且无法撤销。'
+              : '此操作会删除该失败批次的全部切片任务及其受管理的录制证据，且无法撤销。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await _runItemAction(
+      item,
+      () => widget.viewModel.deleteAnalysisQueueItem(item),
+    );
   }
 
   @override
@@ -113,6 +164,16 @@ class _AnalysisQueuePageState extends State<AnalysisQueuePage> {
                       'analysis-queue-item-${activeItems[index].id}',
                     ),
                     item: activeItems[index],
+                    busy: _busyItemIds.contains(
+                      activeItems[index].actionScopeId,
+                    ),
+                    onRetry: () => _runItemAction(
+                      activeItems[index],
+                      () => widget.viewModel.retryAnalysisQueueItem(
+                        activeItems[index],
+                      ),
+                    ),
+                    onDelete: () => _deleteItem(activeItems[index]),
                   ),
                 ),
         ),
@@ -269,9 +330,18 @@ class _EmptyQueue extends StatelessWidget {
 }
 
 class _QueueItem extends StatelessWidget {
-  const _QueueItem({super.key, required this.item});
+  const _QueueItem({
+    super.key,
+    required this.item,
+    required this.busy,
+    required this.onRetry,
+    required this.onDelete,
+  });
 
   final AnalysisQueueItemViewData item;
+  final bool busy;
+  final VoidCallback onRetry;
+  final VoidCallback onDelete;
 
   @override
   Widget build(BuildContext context) {
@@ -373,6 +443,31 @@ class _QueueItem extends StatelessWidget {
               icon: Icons.info_outline,
               color: statusColor,
               text: item.errorSummary ?? '分析失败，未提供错误详情',
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              alignment: WrapAlignment.end,
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                OutlinedButton.icon(
+                  key: ValueKey('analysis-queue-item-retry-${item.id}'),
+                  onPressed: busy ? null : onRetry,
+                  icon: busy
+                      ? const SizedBox.square(
+                          dimension: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.replay, size: 18),
+                  label: const Text('重试'),
+                ),
+                TextButton.icon(
+                  key: ValueKey('analysis-queue-item-delete-${item.id}'),
+                  onPressed: busy ? null : onDelete,
+                  icon: const Icon(Icons.delete_outline, size: 18),
+                  label: const Text('删除'),
+                ),
+              ],
             ),
           ],
         ],

@@ -64,6 +64,11 @@ final class AnalysisQueueItemViewData {
 
   bool get isDailyReport => reportDate != null;
   String get id => isDailyReport ? 'report-$reportDate' : 'chunk-$chunkId';
+  String get actionScopeId => isDailyReport
+      ? 'report-$reportDate'
+      : batchId == null
+      ? 'chunk-$chunkId'
+      : 'batch-$batchId';
   Duration get recordingDuration => recordedUntil.difference(recordedAt);
 }
 
@@ -452,6 +457,8 @@ abstract class QiDayFlowViewModel implements Listenable {
   Future<void> clearManagedLogs();
   Future<void> refreshAnalysisQueue();
   Future<void> retryFailedChunks();
+  Future<bool> retryAnalysisQueueItem(AnalysisQueueItemViewData item);
+  Future<bool> deleteAnalysisQueueItem(AnalysisQueueItemViewData item);
   Future<void> exitApplication();
 }
 

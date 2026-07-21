@@ -65,11 +65,16 @@ class AnalysisCoordinator {
   final Queue<int> _retryBatchIds = Queue<int>();
   final Set<int> _queuedRetryBatchIds = <int>{};
   final Queue<int> _retryChunkIds = Queue<int>();
+  final Queue<int> _targetedBatchIds = Queue<int>();
+  final Queue<DailyReportJob> _targetedReportJobs = Queue<DailyReportJob>();
   Future<void>? _worker;
+  Future<void>? _targetedWorker;
   Future<void>? _reportWorker;
+  Future<void>? _reportOnlyWorker;
   Future<void>? _retryInitialization;
   OpenAiAnalysisService? _activeService;
   bool _stopping = false;
+  bool _normalScheduleRequestedAfterTargeted = false;
   bool _retryScanActive = false;
   bool _retryBatchScanComplete = false;
   bool _retryChunkScanComplete = false;
@@ -79,10 +84,18 @@ class AnalysisCoordinator {
   int _retryRequestedAtMs = 0;
   int _analysisWorkSinceReportCheck = 0;
 
-  bool get isRunning => _worker != null || _reportWorker != null;
+  bool get isRunning =>
+      _worker != null ||
+      _targetedWorker != null ||
+      _reportWorker != null ||
+      _reportOnlyWorker != null;
 
   void schedule() {
     if (_stopping || _worker != null) return;
+    if (_targetedWorker != null) {
+      _normalScheduleRequestedAfterTargeted = true;
+      return;
+    }
     _worker = _drain()
         .catchError((Object error, StackTrace stackTrace) {
           onMessage?.call('分析队列异常：${_errorMessage(error)}');
@@ -93,6 +106,24 @@ class AnalysisCoordinator {
             unawaited(_scheduleAgainIfNeeded());
           }
         });
+  }
+
+  void scheduleDailyReportsOnly() {
+    if (_stopping || _reportOnlyWorker != null) return;
+    _reportOnlyWorker = _drainDailyReportsOnly()
+        .catchError((Object error, StackTrace stackTrace) {
+          onMessage?.call('日报队列异常：${_errorMessage(error)}');
+        })
+        .whenComplete(() {
+          _reportOnlyWorker = null;
+        });
+  }
+
+  Future<void> _drainDailyReportsOnly() async {
+    while (!_stopping && await _processOneDailyReport(scheduleNormal: false)) {
+      final reportWorker = _reportWorker;
+      if (reportWorker != null) await reportWorker;
+    }
   }
 
   Future<void> retryFailed() async {
@@ -115,6 +146,110 @@ class AnalysisCoordinator {
       if (identical(_retryInitialization, initialization)) {
         _retryInitialization = null;
       }
+    }
+  }
+
+  Future<bool> retryFailedItem({
+    required int? chunkId,
+    int? batchId,
+    String? reportDate,
+  }) async {
+    if (_stopping) return false;
+    if (reportDate != null) {
+      if (chunkId != null || batchId != null) {
+        throw ArgumentError('A queue item must identify exactly one target');
+      }
+      final repository = _dailyReportJobRepository;
+      if (repository == null ||
+          _reportGenerator == null ||
+          _reportIsFresh == null) {
+        throw StateError('Daily report retry is not configured');
+      }
+      if (!await repository.retryFailedDailyReportJob(reportDate)) {
+        return false;
+      }
+      final job = await repository.getDailyReportJob(reportDate);
+      if (job == null || job.status != DailyReportJobStatus.processing) {
+        await repository.recoverInterruptedDailyReportJobs();
+        return false;
+      }
+      if (_stopping) {
+        await repository.recoverInterruptedDailyReportJobs();
+        onChanged?.call();
+        return false;
+      }
+      _targetedReportJobs.add(job);
+      onChanged?.call();
+      _scheduleTargeted();
+      return true;
+    }
+    if (chunkId == null) {
+      throw ArgumentError.notNull('chunkId');
+    }
+    final targetBatch = batchId == null
+        ? await _analysisRepository.retryStandaloneFailedChunk(chunkId)
+        : await _retryFailedBatch(batchId);
+    if (targetBatch == null) return false;
+    if (_stopping) {
+      await _analysisRepository.markAnalysisFailed(
+        targetBatch.id!,
+        '应用退出，单项重试已恢复为失败状态',
+      );
+      onChanged?.call();
+      return false;
+    }
+    _targetedBatchIds.add(targetBatch.id!);
+    onChanged?.call();
+    _scheduleTargeted();
+    return true;
+  }
+
+  Future<AnalysisBatch?> _retryFailedBatch(int batchId) async {
+    if (!await _analysisRepository.retryBatch(batchId)) return null;
+    return _analysisRepository.getBatch(batchId);
+  }
+
+  void _scheduleTargeted() {
+    if (_stopping || _targetedWorker != null || _worker != null) return;
+    _targetedWorker = _drainTargeted()
+        .catchError((Object error, StackTrace stackTrace) {
+          onMessage?.call('分析队列异常：${_errorMessage(error)}');
+        })
+        .whenComplete(() {
+          _targetedWorker = null;
+          if (_stopping) return;
+          if (_targetedBatchIds.isNotEmpty || _targetedReportJobs.isNotEmpty) {
+            _scheduleTargeted();
+          } else if (_normalScheduleRequestedAfterTargeted) {
+            _normalScheduleRequestedAfterTargeted = false;
+            schedule();
+          }
+        });
+  }
+
+  Future<void> _drainTargeted() async {
+    while (!_stopping &&
+        (_targetedBatchIds.isNotEmpty || _targetedReportJobs.isNotEmpty)) {
+      if (_targetedBatchIds.isNotEmpty) {
+        final batchId = _targetedBatchIds.removeFirst();
+        await _processBatch(batchId);
+        onChanged?.call();
+        continue;
+      }
+      final job = _targetedReportJobs.removeFirst();
+      final activeReportWorker = _reportWorker;
+      if (activeReportWorker != null) await activeReportWorker;
+      if (_stopping) {
+        await _dailyReportJobRepository!.recoverInterruptedDailyReportJobs();
+        onChanged?.call();
+        return;
+      }
+      await _runDailyReportJob(
+        repository: _dailyReportJobRepository!,
+        generator: _reportGenerator!,
+        isFresh: _reportIsFresh!,
+        job: job,
+      );
     }
   }
 
@@ -141,13 +276,40 @@ class AnalysisCoordinator {
     final retryInitialization = _retryInitialization;
     if (retryInitialization != null) await retryInitialization;
     final worker = _worker;
+    final targetedWorker = _targetedWorker;
     final reportWorker = _reportWorker;
+    final reportOnlyWorker = _reportOnlyWorker;
     await Future.wait(
-      <Future<void>?>[worker, reportWorker].whereType<Future<void>>(),
+      <Future<void>?>[
+        worker,
+        targetedWorker,
+        reportWorker,
+        reportOnlyWorker,
+      ].whereType<Future<void>>(),
     );
+    var recoveredTargetedWork = false;
+    while (_targetedBatchIds.isNotEmpty) {
+      await _analysisRepository.markAnalysisFailed(
+        _targetedBatchIds.removeFirst(),
+        '应用退出，单项重试已恢复为失败状态',
+      );
+      recoveredTargetedWork = true;
+    }
+    if (_targetedReportJobs.isNotEmpty) {
+      _targetedReportJobs.clear();
+      await _dailyReportJobRepository?.recoverInterruptedDailyReportJobs();
+      recoveredTargetedWork = true;
+    }
+    _normalScheduleRequestedAfterTargeted = false;
+    if (recoveredTargetedWork) onChanged?.call();
   }
 
   Future<void> _scheduleAgainIfNeeded() async {
+    if (_targetedBatchIds.isNotEmpty || _targetedReportJobs.isNotEmpty) {
+      _normalScheduleRequestedAfterTargeted = true;
+      _scheduleTargeted();
+      return;
+    }
     if (_retryBatchIds.isNotEmpty ||
         _retryChunkIds.isNotEmpty ||
         _retryScanActive) {
@@ -172,6 +334,9 @@ class AnalysisCoordinator {
 
   Future<void> _drain() async {
     while (!_stopping) {
+      if (_targetedBatchIds.isNotEmpty || _targetedReportJobs.isNotEmpty) {
+        return;
+      }
       if (_retryBatchIds.isEmpty &&
           _retryChunkIds.isEmpty &&
           _retryScanActive) {
@@ -272,7 +437,7 @@ class AnalysisCoordinator {
     return true;
   }
 
-  Future<bool> _processOneDailyReport() async {
+  Future<bool> _processOneDailyReport({bool scheduleNormal = true}) async {
     if (_reportWorker != null) return false;
     final repository = _dailyReportJobRepository;
     final generator = _reportGenerator;
@@ -306,7 +471,7 @@ class AnalysisCoordinator {
               if (identical(_reportWorker, reportWorker)) {
                 _reportWorker = null;
               }
-              if (!_stopping) schedule();
+              if (!_stopping && scheduleNormal) schedule();
             });
     _reportWorker = reportWorker;
     return true;

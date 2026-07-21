@@ -197,6 +197,165 @@ void main() {
       expect(await repository.listAnalysisQueue(limit: 10), hasLength(10));
     },
   );
+
+  test('failed batch retry and delete are atomic and failed-only', () async {
+    final session = await repository.createSession(
+      CaptureSession(
+        captureScope: 'active-window-display',
+        captureDirectory: 'C:/test-only/captures',
+        startedAtMs: baseTime,
+        createdAtMs: baseTime,
+        updatedAtMs: baseTime,
+      ),
+    );
+    final first = await _addChunk(
+      repository,
+      sessionId: session.id!,
+      suffix: 'batch-first',
+      startedAtMs: baseTime,
+      createdAtMs: baseTime,
+    );
+    final second = await _addChunk(
+      repository,
+      sessionId: session.id!,
+      suffix: 'batch-second',
+      startedAtMs: baseTime + 60000,
+      createdAtMs: baseTime + 1,
+    );
+    final batch = await repository.claimChunksForAnalysis(<int>[
+      first.id!,
+      second.id!,
+    ]);
+
+    expect(await repository.deleteFailedBatch(batch.id!), isFalse);
+    await repository.markAnalysisFailed(batch.id!, 'failed');
+    expect(await repository.retryBatch(batch.id!), isTrue);
+    expect(await repository.retryBatch(batch.id!), isFalse);
+    expect(
+      (await repository.getBatch(batch.id!))?.status,
+      ProcessingStatus.processing,
+    );
+    expect(
+      (await repository.getChunk(first.id!))?.status,
+      ProcessingStatus.processing,
+    );
+    expect(
+      (await repository.getChunk(second.id!))?.status,
+      ProcessingStatus.processing,
+    );
+    expect(await repository.deleteFailedBatch(batch.id!), isFalse);
+
+    await repository.markAnalysisFailed(batch.id!, 'failed again');
+    expect(await repository.deleteFailedBatch(batch.id!), isTrue);
+    expect(await repository.deleteFailedBatch(batch.id!), isFalse);
+    expect(await repository.getBatch(batch.id!), isNull);
+    expect(await repository.getChunk(first.id!), isNull);
+    expect(await repository.getChunk(second.id!), isNull);
+    final db = await appDatabase.open();
+    expect(
+      await db.query(
+        'analysis_batch_chunks',
+        where: 'batch_id = ?',
+        whereArgs: <Object?>[batch.id!],
+      ),
+      isEmpty,
+    );
+    expect(await db.rawQuery('PRAGMA foreign_key_check'), isEmpty);
+  });
+
+  test('standalone failed chunk delete is scoped and failed-only', () async {
+    final session = await repository.createSession(
+      CaptureSession(
+        captureScope: 'active-window-display',
+        captureDirectory: 'C:/test-only/captures',
+        startedAtMs: baseTime,
+        createdAtMs: baseTime,
+        updatedAtMs: baseTime,
+      ),
+    );
+    final failed = await _addChunk(
+      repository,
+      sessionId: session.id!,
+      suffix: 'standalone-failed',
+      startedAtMs: baseTime,
+      createdAtMs: baseTime,
+      status: ProcessingStatus.failed,
+    );
+    final otherFailed = await _addChunk(
+      repository,
+      sessionId: session.id!,
+      suffix: 'standalone-other',
+      startedAtMs: baseTime + 60000,
+      createdAtMs: baseTime + 1,
+      status: ProcessingStatus.failed,
+    );
+    final pending = await _addChunk(
+      repository,
+      sessionId: session.id!,
+      suffix: 'standalone-pending',
+      startedAtMs: baseTime + 120000,
+      createdAtMs: baseTime + 2,
+    );
+
+    expect(await repository.deleteFailedChunk(pending.id!), isFalse);
+    expect(await repository.deleteFailedChunk(failed.id!), isTrue);
+    expect(await repository.deleteFailedChunk(failed.id!), isFalse);
+    expect(await repository.getChunk(failed.id!), isNull);
+    expect(
+      (await repository.getChunk(otherFailed.id!))?.status,
+      ProcessingStatus.failed,
+    );
+    expect(
+      (await repository.getChunk(pending.id!))?.status,
+      ProcessingStatus.pending,
+    );
+  });
+
+  test(
+    'standalone failed chunk retry atomically creates only its batch',
+    () async {
+      final session = await repository.createSession(
+        CaptureSession(
+          captureScope: 'active-window-display',
+          captureDirectory: 'C:/test-only/captures',
+          startedAtMs: baseTime,
+          createdAtMs: baseTime,
+          updatedAtMs: baseTime,
+        ),
+      );
+      final target = await _addChunk(
+        repository,
+        sessionId: session.id!,
+        suffix: 'retry-target',
+        startedAtMs: baseTime,
+        createdAtMs: baseTime,
+        status: ProcessingStatus.failed,
+      );
+      final other = await _addChunk(
+        repository,
+        sessionId: session.id!,
+        suffix: 'retry-other',
+        startedAtMs: baseTime + 60000,
+        createdAtMs: baseTime + 1,
+        status: ProcessingStatus.failed,
+      );
+
+      final batch = await repository.retryStandaloneFailedChunk(target.id!);
+
+      expect(batch?.chunkIds, <int>[target.id!]);
+      expect(batch?.status, ProcessingStatus.processing);
+      expect(
+        (await repository.getChunk(target.id!))?.status,
+        ProcessingStatus.processing,
+      );
+      expect(
+        (await repository.getChunk(other.id!))?.status,
+        ProcessingStatus.failed,
+      );
+      expect(await repository.retryStandaloneFailedChunk(target.id!), isNull);
+      expect(await repository.listAnalysisQueue(), hasLength(2));
+    },
+  );
 }
 
 Future<CaptureChunk> _addChunk(

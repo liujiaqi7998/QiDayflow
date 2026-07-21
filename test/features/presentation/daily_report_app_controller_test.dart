@@ -17,6 +17,29 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setUpAll(sqfliteFfiInit);
 
+  test('empty day succeeds without an API key or provider', () async {
+    final harness = await _ControllerHarness.create(
+      withApiKey: false,
+      useRealDailyReportService: true,
+    );
+    addTearDown(harness.close);
+    await harness.initialize();
+    harness.controller.selectSection(AppSection.report);
+
+    await harness.controller.generateDailyReport();
+    await _waitUntil(
+      () async =>
+          await harness.repository.getDailyReportJob('2026-07-13') == null,
+    );
+
+    expect(harness.controller.section, AppSection.report);
+    expect(
+      (await harness.repository.getDailyReport('2026-07-13'))?.content,
+      '当日暂无可生成日报的活动',
+    );
+    expect(harness.analysisServiceBuilds, isEmpty);
+  });
+
   test(
     'enqueue returns before generation and background work survives leaving report',
     () async {
@@ -120,6 +143,28 @@ void main() {
     expect(harness.reportService.generateCalls, 2);
   });
 
+  test('initialize recovers an empty report without an API key', () async {
+    final harness = await _ControllerHarness.create(
+      withApiKey: false,
+      useRealDailyReportService: true,
+    );
+    addTearDown(harness.close);
+    await harness.repository.enqueueDailyReportJob('2026-07-13');
+    await harness.repository.claimNextDailyReportJob();
+
+    await harness.initialize();
+    await _waitUntil(
+      () async =>
+          await harness.repository.getDailyReportJob('2026-07-13') == null,
+    );
+
+    expect(
+      (await harness.repository.getDailyReport('2026-07-13'))?.content,
+      '当日暂无可生成日报的活动',
+    );
+    expect(harness.analysisServiceBuilds, isEmpty);
+  });
+
   test('initialize recovers an interrupted report and schedules it', () async {
     final harness = await _ControllerHarness.create();
     addTearDown(harness.close);
@@ -174,6 +219,7 @@ final class _ControllerHarness {
     required this.reportService,
     required this.methodChannel,
     required this.eventChannel,
+    required this.analysisServiceBuilds,
   });
 
   final Directory root;
@@ -183,8 +229,12 @@ final class _ControllerHarness {
   final _FakeDailyReportService reportService;
   final MethodChannel methodChannel;
   final EventChannel eventChannel;
+  final List<void> analysisServiceBuilds;
 
-  static Future<_ControllerHarness> create() async {
+  static Future<_ControllerHarness> create({
+    bool withApiKey = true,
+    bool useRealDailyReportService = false,
+  }) async {
     final root = await Directory.systemTemp.createTemp(
       'qi_day_flow_daily_report_controller_test_',
     );
@@ -222,7 +272,9 @@ final class _ControllerHarness {
     );
     final defaults = await settingsService.load();
     await settingsService.save(defaults, plaintextApiKey: 'test-api-key');
+    if (!withApiKey) await settingsService.save(defaults);
     final reportService = _FakeDailyReportService(repository);
+    final analysisServiceBuilds = <void>[];
     final controller = AppController(
       database: database,
       repository: repository,
@@ -230,7 +282,11 @@ final class _ControllerHarness {
       settingsService: settingsService,
       activeUserDataDirectory: root.path,
       now: () => DateTime(2026, 7, 13, 12),
-      dailyReportService: reportService,
+      dailyReportService: useRealDailyReportService ? null : reportService,
+      analysisServiceBuilder: (_) {
+        analysisServiceBuilds.add(null);
+        throw StateError('provider must not be created');
+      },
     );
     return _ControllerHarness._(
       root: root,
@@ -240,6 +296,7 @@ final class _ControllerHarness {
       reportService: reportService,
       methodChannel: methodChannel,
       eventChannel: eventChannel,
+      analysisServiceBuilds: analysisServiceBuilds,
     );
   }
 

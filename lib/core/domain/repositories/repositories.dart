@@ -105,6 +105,12 @@ abstract interface class AnalysisRepository {
 
   Future<bool> retryBatch(int batchId);
 
+  Future<AnalysisBatch?> retryStandaloneFailedChunk(int chunkId);
+
+  Future<bool> deleteFailedBatch(int batchId);
+
+  Future<bool> deleteFailedChunk(int chunkId);
+
   Future<AnalysisCommitResult> completeAnalysis({
     required int batchId,
     required List<Observation> observations,
@@ -175,6 +181,10 @@ abstract interface class DailyReportJobRepository {
   });
 
   Future<int> retryFailedDailyReportJobs();
+
+  Future<bool> retryFailedDailyReportJob(String reportDate);
+
+  Future<bool> deleteFailedDailyReportJob(String reportDate);
 
   Future<int> recoverInterruptedDailyReportJobs();
 }

@@ -415,6 +415,142 @@ void main() {
       everyElement(lessThanOrEqualTo(100)),
     );
   });
+
+  test('stop racing a single retry does not strand processing work', () async {
+    final repository = _SchedulingRepository(retryCount: 1);
+    final retryGate = repository.retryBatchGate = Completer<void>();
+    final coordinator = AnalysisCoordinator(
+      captureRepository: repository,
+      analysisRepository: repository,
+      timelineRepository: repository,
+      evidenceReader: const _EmptyEvidenceReader(),
+      serviceFactory: () async => throw StateError('must not start'),
+    );
+
+    final retrying = coordinator.retryFailedItem(chunkId: 1, batchId: 1);
+    await _waitUntil(
+      () => repository.batches[1]?.status == ProcessingStatus.processing,
+    );
+    await coordinator.stop();
+    retryGate.complete();
+
+    expect(await retrying, isFalse);
+    expect(repository.batches[1]?.status, ProcessingStatus.failed);
+    expect(repository.chunks[1]?.status, ProcessingStatus.failed);
+  });
+
+  test('stop recovers a targeted retry queued behind normal work', () async {
+    final repository = _SchedulingRepository(retryCount: 1);
+    final evidenceReader = _ConcurrencyTrackingEvidenceReader();
+    final coordinator = AnalysisCoordinator(
+      captureRepository: repository,
+      analysisRepository: repository,
+      timelineRepository: repository,
+      evidenceReader: evidenceReader,
+      serviceFactory: () async => throw StateError('must not start'),
+    );
+
+    coordinator.schedule();
+    await evidenceReader.firstEntered.future.timeout(
+      const Duration(seconds: 2),
+    );
+    expect(await coordinator.retryFailedItem(chunkId: 1, batchId: 1), isTrue);
+    expect(repository.batches[1]?.status, ProcessingStatus.processing);
+
+    final stopping = coordinator.stop();
+    evidenceReader.release();
+    await stopping;
+
+    expect(repository.batches[1]?.status, ProcessingStatus.failed);
+    expect(repository.chunks[1]?.status, ProcessingStatus.failed);
+  });
+
+  test('single retry preempts the remaining normal backlog', () async {
+    final repository = _SchedulingRepository(
+      retryCount: 1,
+      freshPendingCount: 2,
+    );
+    final evidenceReader = _ConcurrencyTrackingEvidenceReader();
+    final coordinator = AnalysisCoordinator(
+      captureRepository: repository,
+      analysisRepository: repository,
+      timelineRepository: repository,
+      evidenceReader: evidenceReader,
+      serviceFactory: () async => throw StateError('expected test failure'),
+    );
+
+    coordinator.schedule();
+    await evidenceReader.firstEntered.future.timeout(
+      const Duration(seconds: 2),
+    );
+    expect(await coordinator.retryFailedItem(chunkId: 1, batchId: 1), isTrue);
+    evidenceReader.release();
+    await _waitUntil(() => evidenceReader.readChunkIds.length >= 2);
+    await coordinator.stop();
+
+    expect(evidenceReader.readChunkIds.take(2), <int>[
+      _SchedulingRepository.freshId,
+      1,
+    ]);
+  });
+
+  test(
+    'single retry does not run concurrently with the normal analysis worker',
+    () async {
+      final repository = _SchedulingRepository(retryCount: 1);
+      final evidenceReader = _ConcurrencyTrackingEvidenceReader();
+      final coordinator = AnalysisCoordinator(
+        captureRepository: repository,
+        analysisRepository: repository,
+        timelineRepository: repository,
+        evidenceReader: evidenceReader,
+        serviceFactory: () async => throw StateError('expected test failure'),
+      );
+
+      coordinator.schedule();
+      try {
+        await evidenceReader.firstEntered.future.timeout(
+          const Duration(seconds: 2),
+        );
+        expect(
+          await coordinator.retryFailedItem(chunkId: 1, batchId: 1),
+          isTrue,
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        expect(evidenceReader.maxConcurrentReads, 1);
+      } finally {
+        evidenceReader.release();
+        await coordinator.stop();
+      }
+    },
+  );
+
+  test('single retry schedules only the selected failed item', () async {
+    final repository = _SchedulingRepository(retryCount: 2);
+    final coordinator = AnalysisCoordinator(
+      captureRepository: repository,
+      analysisRepository: repository,
+      timelineRepository: repository,
+      evidenceReader: const _EmptyEvidenceReader(),
+      serviceFactory: () async => throw StateError('expected test failure'),
+    );
+
+    expect(await coordinator.retryFailedItem(chunkId: 1, batchId: 1), isTrue);
+    await _waitUntil(() => repository.processedBatchIds.contains(1));
+    await coordinator.stop();
+
+    expect(repository.retriedBatchIds, <int>[1]);
+    expect(repository.processedBatchIds, <int>[1]);
+    expect(repository.batches[2]?.status, ProcessingStatus.failed);
+    expect(repository.chunks[2]?.status, ProcessingStatus.failed);
+    expect(
+      repository.claimedChunkIds,
+      isNot(contains(_SchedulingRepository.freshId)),
+    );
+    expect(repository.batchPageLimits, isEmpty);
+    expect(repository.standalonePageLimits, isEmpty);
+  });
 }
 
 Future<void> _waitUntil(bool Function() condition) async {
@@ -432,6 +568,7 @@ final class _SchedulingRepository
   _SchedulingRepository({
     required int retryCount,
     int standaloneRetryCount = 0,
+    int freshPendingCount = 1,
   }) {
     for (var id = 1; id <= retryCount; id++) {
       final chunk = _chunk(id, ProcessingStatus.failed);
@@ -441,7 +578,10 @@ final class _SchedulingRepository
     for (var id = 1; id <= standaloneRetryCount; id++) {
       chunks[id] = _chunk(id, ProcessingStatus.failed);
     }
-    chunks[freshId] = _chunk(freshId, ProcessingStatus.pending);
+    for (var offset = 0; offset < freshPendingCount; offset++) {
+      final id = freshId + offset;
+      chunks[id] = _chunk(id, ProcessingStatus.pending);
+    }
   }
 
   static const int freshId = 10000;
@@ -454,6 +594,7 @@ final class _SchedulingRepository
   final List<int> claimedChunkIds = <int>[];
   final Set<int> _processingBatchIds = <int>{};
   Completer<int>? maxAnalysisBatchIdGate;
+  Completer<void>? retryBatchGate;
   var claimedFreshChunks = 0;
   var _nextClaimedBatchId = 100000;
 
@@ -499,6 +640,8 @@ final class _SchedulingRepository
     );
     final chunkId = batch.chunkIds.single;
     chunks[chunkId] = _chunk(chunkId, ProcessingStatus.processing);
+    final gate = retryBatchGate;
+    if (gate != null) await gate.future;
     return true;
   }
 
@@ -628,6 +771,38 @@ final class _EmptyEvidenceReader extends ChunkEvidenceReader {
     windowContexts: <WindowContextSegment>[],
     resourceSamples: <WindowResourceSample>[],
   );
+}
+
+final class _ConcurrencyTrackingEvidenceReader extends ChunkEvidenceReader {
+  final Completer<void> firstEntered = Completer<void>();
+  final Completer<void> _release = Completer<void>();
+  int _activeReads = 0;
+  int maxConcurrentReads = 0;
+  final List<int> readChunkIds = <int>[];
+
+  @override
+  Future<ChunkEvidence> read(CaptureChunk chunk) async {
+    readChunkIds.add(chunk.id!);
+    _activeReads++;
+    if (_activeReads > maxConcurrentReads) {
+      maxConcurrentReads = _activeReads;
+    }
+    if (!firstEntered.isCompleted) firstEntered.complete();
+    try {
+      await _release.future;
+      return const ChunkEvidence(
+        keyFrames: <AnalysisKeyFrame>[],
+        windowContexts: <WindowContextSegment>[],
+        resourceSamples: <WindowResourceSample>[],
+      );
+    } finally {
+      _activeReads--;
+    }
+  }
+
+  void release() {
+    if (!_release.isCompleted) _release.complete();
+  }
 }
 
 final class _FakeTransport implements ChatTransport {

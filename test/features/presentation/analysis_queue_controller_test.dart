@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
@@ -8,6 +9,7 @@ import 'package:qi_day_flow/data/data.dart';
 import 'package:qi_day_flow/features/presentation/app_controller.dart';
 import 'package:qi_day_flow/features/presentation/app_view_model.dart';
 import 'package:qi_day_flow/services/native/native_capture_service.dart';
+import 'package:qi_day_flow/services/processing/chunk_evidence.dart';
 import 'package:qi_day_flow/services/secure_settings_service.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
@@ -72,9 +74,30 @@ void main() {
       const eventChannel = EventChannel(
         'qi_day_flow/test/queue-controller-events',
       );
+      final evidenceDeleteEntered = Completer<void>();
+      final releaseEvidenceDelete = Completer<void>();
+      addTearDown(() {
+        if (!releaseEvidenceDelete.isCompleted) {
+          releaseEvidenceDelete.complete();
+        }
+      });
       final messenger =
           TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
-      messenger.setMockMethodCallHandler(methodChannel, (_) async => null);
+      messenger.setMockMethodCallHandler(methodChannel, (call) async {
+        if (call.method == 'deleteChunk') {
+          if (!evidenceDeleteEntered.isCompleted) {
+            evidenceDeleteEntered.complete();
+          }
+          await releaseEvidenceDelete.future;
+          final arguments = call.arguments! as Map<Object?, Object?>;
+          final directory = Directory(arguments['directoryPath']! as String);
+          if (await directory.exists()) {
+            await directory.delete(recursive: true);
+          }
+          return true;
+        }
+        return null;
+      });
       messenger.setMockMethodCallHandler(
         const MethodChannel('qi_day_flow/test/queue-controller-events'),
         (_) async => null,
@@ -92,6 +115,7 @@ void main() {
           platform: native,
           defaultCaptureDirectory: captureDirectory.path,
         ),
+        evidenceStore: EvidenceStore(nativeService: native),
       );
       addTearDown(() async {
         controller.dispose();
@@ -140,6 +164,7 @@ void main() {
         suffix: 'failed',
         startedAtMs: now + 180000,
         createdAtMs: now + 30,
+        captureRoot: captureDirectory.path,
       );
       final failedBatch = await repository.claimChunksForAnalysis([
         failedChunk.id!,
@@ -184,6 +209,77 @@ void main() {
       expect(processing.errorSummary, isNull);
       expect(controller.analysisQueue.items.last.errorSummary, '网络连接失败');
 
+      final failedItem = controller.analysisQueue.items.last;
+      final sqlite = await database.open();
+      await sqlite.update(
+        'capture_chunks',
+        <String, Object?>{'status': ProcessingStatus.pending.name},
+        where: 'id = ?',
+        whereArgs: <Object?>[failedChunk.id!],
+      );
+      expect(await controller.deleteAnalysisQueueItem(failedItem), isFalse);
+      expect(await File(failedChunk.metadataPath).exists(), isTrue);
+      expect(await File(failedChunk.videoPath!).exists(), isTrue);
+      await sqlite.update(
+        'capture_chunks',
+        <String, Object?>{'status': ProcessingStatus.failed.name},
+        where: 'id = ?',
+        whereArgs: <Object?>[failedChunk.id!],
+      );
+
+      final deletion = controller.deleteAnalysisQueueItem(failedItem);
+      await evidenceDeleteEntered.future.timeout(const Duration(seconds: 2));
+      var retryCompleted = false;
+      final concurrentRetry = controller
+          .retryAnalysisQueueItem(failedItem)
+          .whenComplete(() => retryCompleted = true);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(retryCompleted, isFalse);
+      releaseEvidenceDelete.complete();
+      expect(await deletion, isTrue);
+      expect(await concurrentRetry, isFalse);
+      await controller.refreshAnalysisQueue();
+      expect(
+        controller.analysisQueue.items.any(
+          (item) => item.batchId == failedBatch.id,
+        ),
+        isFalse,
+      );
+      expect(await repository.getBatch(failedBatch.id!), isNull);
+      expect(await repository.getChunk(failedChunk.id!), isNull);
+      expect(await File(failedChunk.metadataPath).exists(), isFalse);
+      expect(await File(failedChunk.videoPath!).exists(), isFalse);
+      expect(await Directory(failedChunk.framesDirectory).exists(), isFalse);
+
+      final unsafeFailed = await _addChunk(
+        repository,
+        sessionId: session.id!,
+        suffix: 'unsafe-failed',
+        startedAtMs: now + 260000,
+        createdAtMs: now + 44,
+        status: ProcessingStatus.failed,
+      );
+      await controller.refreshAnalysisQueue();
+      final unsafeItem = controller.analysisQueue.items.singleWhere(
+        (item) => item.chunkId == unsafeFailed.id,
+      );
+      expect(await controller.deleteAnalysisQueueItem(unsafeItem), isFalse);
+      expect(await repository.getChunk(unsafeFailed.id!), isNotNull);
+
+      final standaloneFailed = await _addChunk(
+        repository,
+        sessionId: session.id!,
+        suffix: 'standalone-failed',
+        startedAtMs: now + 270000,
+        createdAtMs: now + 45,
+        status: ProcessingStatus.failed,
+      );
+      await controller.refreshAnalysisQueue();
+      final standaloneItem = controller.analysisQueue.items.singleWhere(
+        (item) => item.chunkId == standaloneFailed.id,
+      );
+      expect(await controller.retryAnalysisQueueItem(standaloneItem), isTrue);
+
       final nextPending = await _addChunk(
         repository,
         sessionId: session.id!,
@@ -212,13 +308,28 @@ Future<CaptureChunk> _addChunk(
   required int startedAtMs,
   required int createdAtMs,
   ProcessingStatus status = ProcessingStatus.pending,
-}) {
+  String? captureRoot,
+}) async {
+  final framesDirectory = captureRoot == null
+      ? 'C:/test-only/$suffix'
+      : p.join(captureRoot, suffix);
+  final metadataPath = captureRoot == null
+      ? '$framesDirectory/metadata.json'
+      : p.join(framesDirectory, 'chunk_$suffix.json');
+  final videoPath = captureRoot == null
+      ? '$framesDirectory/video.mp4'
+      : p.join(framesDirectory, 'chunk_$suffix.mp4');
+  if (captureRoot != null) {
+    await Directory(framesDirectory).create(recursive: true);
+    await File(metadataPath).writeAsString('{}');
+    await File(videoPath).writeAsBytes(<int>[0]);
+  }
   return repository.addChunk(
     CaptureChunk(
       sessionId: sessionId,
-      framesDirectory: 'C:/test-only/$suffix',
-      metadataPath: 'C:/test-only/$suffix/metadata.json',
-      videoPath: 'C:/test-only/$suffix/video.mp4',
+      framesDirectory: framesDirectory,
+      metadataPath: metadataPath,
+      videoPath: videoPath,
       startedAtMs: startedAtMs,
       endedAtMs: startedAtMs + 60000,
       frameCount: 5,

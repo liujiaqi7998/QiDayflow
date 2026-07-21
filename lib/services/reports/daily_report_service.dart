@@ -60,7 +60,18 @@ class DailyReportService {
     );
     final cards = await _timelineRepository.listCardsForReportDate(reportDate);
     if (cards.isEmpty) {
-      throw StateError('当天没有可生成日报的活动卡片');
+      const content = '当日暂无可生成日报的活动';
+      final model = await _modelName();
+      if (cancellationGeneration != _cancellationGeneration) {
+        throw StateError('日报生成已取消');
+      }
+      await _reportRepository.saveDailyReport(
+        reportDate: reportDate,
+        content: content,
+        model: '$model|$promptVersion',
+        expectedRevision: expectedRevision,
+      );
+      return content;
     }
     final service = await _serviceFactory();
     if (cancellationGeneration != _cancellationGeneration) {
