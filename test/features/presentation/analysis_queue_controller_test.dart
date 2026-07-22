@@ -85,11 +85,6 @@ void main() {
       );
       final evidenceDeleteEntered = Completer<void>();
       final releaseEvidenceDelete = Completer<void>();
-      addTearDown(() {
-        if (!releaseEvidenceDelete.isCompleted) {
-          releaseEvidenceDelete.complete();
-        }
-      });
       final messenger =
           TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
       messenger.setMockMethodCallHandler(methodChannel, (call) async {
@@ -143,8 +138,11 @@ void main() {
         ),
       );
       addTearDown(() async {
+        if (!releaseEvidenceDelete.isCompleted) {
+          releaseEvidenceDelete.complete();
+        }
+        await controller.shutdown();
         controller.dispose();
-        await database.close();
         messenger.setMockMethodCallHandler(methodChannel, null);
         messenger.setMockMethodCallHandler(
           const MethodChannel('qi_day_flow/test/queue-controller-events'),
