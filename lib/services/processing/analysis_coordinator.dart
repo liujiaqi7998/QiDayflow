@@ -70,8 +70,11 @@ class AnalysisCoordinator {
   Future<void>? _worker;
   Future<void>? _targetedWorker;
   Future<void>? _reportWorker;
+  Future<void> _reportTail = Future<void>.value();
   Future<void>? _reportOnlyWorker;
+  Future<void>? _rescheduleWorker;
   Future<void>? _retryInitialization;
+  final Set<Future<bool>> _pendingReportClaims = <Future<bool>>{};
   OpenAiAnalysisService? _activeService;
   bool _stopping = false;
   bool _normalScheduleRequestedAfterTargeted = false;
@@ -102,9 +105,7 @@ class AnalysisCoordinator {
         })
         .whenComplete(() {
           _worker = null;
-          if (!_stopping) {
-            unawaited(_scheduleAgainIfNeeded());
-          }
+          _scheduleFollowUp();
         });
   }
 
@@ -117,6 +118,28 @@ class AnalysisCoordinator {
         .whenComplete(() {
           _reportOnlyWorker = null;
         });
+  }
+
+  Future<bool> schedulePendingDailyReport(String reportDate) {
+    if (_stopping) return Future<bool>.value(false);
+    late final Future<bool> operation;
+    operation = _claimPendingDailyReport(reportDate).whenComplete(() {
+      _pendingReportClaims.remove(operation);
+    });
+    _pendingReportClaims.add(operation);
+    return operation;
+  }
+
+  Future<bool> _claimPendingDailyReport(String reportDate) async {
+    final repository = _dailyReportJobRepository;
+    if (repository == null ||
+        _reportGenerator == null ||
+        _reportIsFresh == null) {
+      throw StateError('Daily report scheduling is not configured');
+    }
+    final job = await repository.claimPendingDailyReportJob(reportDate);
+    if (job == null) return false;
+    return _queueTargetedReportJob(job);
   }
 
   Future<void> _drainDailyReportsOnly() async {
@@ -173,15 +196,7 @@ class AnalysisCoordinator {
         await repository.recoverInterruptedDailyReportJobs();
         return false;
       }
-      if (_stopping) {
-        await repository.recoverInterruptedDailyReportJobs();
-        onChanged?.call();
-        return false;
-      }
-      _targetedReportJobs.add(job);
-      onChanged?.call();
-      _scheduleTargeted();
-      return true;
+      return _queueTargetedReportJob(job);
     }
     if (chunkId == null) {
       throw ArgumentError.notNull('chunkId');
@@ -199,6 +214,18 @@ class AnalysisCoordinator {
       return false;
     }
     _targetedBatchIds.add(targetBatch.id!);
+    onChanged?.call();
+    _scheduleTargeted();
+    return true;
+  }
+
+  Future<bool> _queueTargetedReportJob(DailyReportJob job) async {
+    if (_stopping) {
+      await _dailyReportJobRepository!.recoverInterruptedDailyReportJobs();
+      onChanged?.call();
+      return false;
+    }
+    _targetedReportJobs.add(job);
     onChanged?.call();
     _scheduleTargeted();
     return true;
@@ -237,19 +264,19 @@ class AnalysisCoordinator {
         continue;
       }
       final job = _targetedReportJobs.removeFirst();
-      final activeReportWorker = _reportWorker;
-      if (activeReportWorker != null) await activeReportWorker;
-      if (_stopping) {
-        await _dailyReportJobRepository!.recoverInterruptedDailyReportJobs();
-        onChanged?.call();
-        return;
-      }
-      await _runDailyReportJob(
-        repository: _dailyReportJobRepository!,
-        generator: _reportGenerator!,
-        isFresh: _reportIsFresh!,
-        job: job,
-      );
+      await _enqueueReportOperation(() async {
+        if (_stopping) {
+          await _dailyReportJobRepository!.recoverInterruptedDailyReportJobs();
+          onChanged?.call();
+          return;
+        }
+        await _runDailyReportJob(
+          repository: _dailyReportJobRepository!,
+          generator: _reportGenerator!,
+          isFresh: _reportIsFresh!,
+          job: job,
+        );
+      });
     }
   }
 
@@ -273,6 +300,7 @@ class AnalysisCoordinator {
   Future<void> stop() async {
     _stopping = true;
     _activeService?.close();
+    await Future.wait(_pendingReportClaims.toList(growable: false));
     final retryInitialization = _retryInitialization;
     if (retryInitialization != null) await retryInitialization;
     final worker = _worker;
@@ -287,6 +315,8 @@ class AnalysisCoordinator {
         reportOnlyWorker,
       ].whereType<Future<void>>(),
     );
+    final rescheduleWorker = _rescheduleWorker;
+    if (rescheduleWorker != null) await rescheduleWorker;
     var recoveredTargetedWork = false;
     while (_targetedBatchIds.isNotEmpty) {
       await _analysisRepository.markAnalysisFailed(
@@ -305,6 +335,7 @@ class AnalysisCoordinator {
   }
 
   Future<void> _scheduleAgainIfNeeded() async {
+    if (_stopping) return;
     if (_targetedBatchIds.isNotEmpty || _targetedReportJobs.isNotEmpty) {
       _normalScheduleRequestedAfterTargeted = true;
       _scheduleTargeted();
@@ -316,20 +347,38 @@ class AnalysisCoordinator {
       schedule();
       return;
     }
+    if (_stopping) return;
     final pending = await _captureRepository.listChunks(
       statuses: const <ProcessingStatus>{ProcessingStatus.pending},
       dueAtMs: DateTime.now().toUtc().millisecondsSinceEpoch,
       limit: 1,
     );
+    if (_stopping) return;
     if (pending.isNotEmpty) {
       schedule();
       return;
     }
     final reportJobs = await _dailyReportJobRepository?.listDailyReportJobs();
+    if (_stopping) return;
     if (reportJobs?.any((job) => job.status == DailyReportJobStatus.pending) ??
         false) {
       schedule();
     }
+  }
+
+  void _scheduleFollowUp() {
+    if (_stopping || _rescheduleWorker != null) return;
+    late final Future<void> operation;
+    operation = _scheduleAgainIfNeeded()
+        .catchError((Object error, StackTrace stackTrace) {
+          onMessage?.call('分析队列异常：${_errorMessage(error)}');
+        })
+        .whenComplete(() {
+          if (identical(_rescheduleWorker, operation)) {
+            _rescheduleWorker = null;
+          }
+        });
+    _rescheduleWorker = operation;
   }
 
   Future<void> _drain() async {
@@ -437,44 +486,69 @@ class AnalysisCoordinator {
     return true;
   }
 
-  Future<bool> _processOneDailyReport({bool scheduleNormal = true}) async {
-    if (_reportWorker != null) return false;
+  Future<bool> _processOneDailyReport({bool scheduleNormal = true}) {
     final repository = _dailyReportJobRepository;
     final generator = _reportGenerator;
     final isFresh = _reportIsFresh;
     if (repository == null || generator == null || isFresh == null) {
-      return false;
-    }
-    final job = await repository.claimNextDailyReportJob();
-    if (job == null) {
-      return false;
-    }
-    onChanged?.call();
-    if (_stopping) {
-      await repository.recoverInterruptedDailyReportJobs();
-      onChanged?.call();
-      return false;
+      return Future<bool>.value(false);
     }
 
-    late final Future<void> reportWorker;
-    reportWorker =
-        _runDailyReportJob(
-              repository: repository,
-              generator: generator,
-              isFresh: isFresh,
-              job: job,
-            )
-            .catchError((Object error, StackTrace stackTrace) {
-              onMessage?.call('日报队列异常：${_errorMessage(error)}');
-            })
-            .whenComplete(() {
-              if (identical(_reportWorker, reportWorker)) {
-                _reportWorker = null;
-              }
-              if (!_stopping && scheduleNormal) schedule();
-            });
-    _reportWorker = reportWorker;
-    return true;
+    final accepted = Completer<bool>();
+    unawaited(
+      _enqueueReportOperation(() async {
+        try {
+          if (_stopping) {
+            accepted.complete(false);
+            return;
+          }
+          final job = await repository.claimNextDailyReportJob();
+          if (job == null) {
+            accepted.complete(false);
+            return;
+          }
+          onChanged?.call();
+          if (_stopping) {
+            await repository.recoverInterruptedDailyReportJobs();
+            onChanged?.call();
+            accepted.complete(false);
+            return;
+          }
+          accepted.complete(true);
+          await _runDailyReportJob(
+            repository: repository,
+            generator: generator,
+            isFresh: isFresh,
+            job: job,
+          );
+        } on Object catch (error, stackTrace) {
+          if (!accepted.isCompleted) {
+            accepted.completeError(error, stackTrace);
+          }
+          rethrow;
+        } finally {
+          if (!_stopping && scheduleNormal) schedule();
+        }
+      }),
+    );
+    return accepted.future;
+  }
+
+  Future<void> _enqueueReportOperation(Future<void> Function() operation) {
+    final next = _reportTail.then((_) => operation());
+    late final Future<void> guarded;
+    guarded = next
+        .catchError((Object error, StackTrace stackTrace) {
+          onMessage?.call('日报队列异常：${_errorMessage(error)}');
+        })
+        .whenComplete(() {
+          if (identical(_reportWorker, guarded)) {
+            _reportWorker = null;
+          }
+        });
+    _reportTail = guarded;
+    _reportWorker = guarded;
+    return guarded;
   }
 
   Future<void> _runDailyReportJob({
@@ -495,6 +569,10 @@ class AnalysisCoordinator {
         return;
       }
       await generator(job.reportDate);
+      if (_stopping) {
+        await repository.recoverInterruptedDailyReportJobs();
+        return;
+      }
       if (!await repository.completeDailyReportJob(job.reportDate)) {
         throw StateError('日报任务完成状态已变化');
       }

@@ -1330,6 +1330,32 @@ final class SqliteDayFlowRepository
   }
 
   @override
+  Future<DailyReportJob?> claimPendingDailyReportJob(String reportDate) {
+    final date = requireReportDate(reportDate);
+    final now = clock.nowUtcEpochMs();
+    return database.transaction((transaction) async {
+      final claimed = await transaction.update(
+        'daily_report_jobs',
+        <String, Object?>{
+          'status': DailyReportJobStatus.processing.name,
+          'updated_at_ms': now,
+          'processing_started_at_ms': now,
+        },
+        where: 'report_date = ? AND status = ?',
+        whereArgs: <Object?>[date, DailyReportJobStatus.pending.name],
+      );
+      if (claimed != 1) return null;
+      final rows = await transaction.query(
+        'daily_report_jobs',
+        where: 'report_date = ?',
+        whereArgs: <Object?>[date],
+        limit: 1,
+      );
+      return _dailyReportJobFromRow(rows.single);
+    });
+  }
+
+  @override
   Future<bool> completeDailyReportJob(String reportDate) async {
     final db = await database.open();
     return await db.delete(

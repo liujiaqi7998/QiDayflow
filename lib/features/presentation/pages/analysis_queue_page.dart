@@ -50,8 +50,13 @@ class _AnalysisQueuePageState extends State<AnalysisQueuePage> {
     setState(() => _busyItemIds.add(item.actionScopeId));
     try {
       await runUiAction(context, () async {
-        await action();
+        final succeeded = await action();
         await widget.viewModel.refreshAnalysisQueue();
+        if (!succeeded && mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('操作未完成，任务状态未更改')));
+        }
       });
     } finally {
       if (mounted) {

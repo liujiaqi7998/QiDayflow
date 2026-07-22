@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
@@ -67,6 +68,14 @@ void main() {
       );
       final repository = SqliteDayFlowRepository(database);
       await database.open();
+      await repository.putSetting(
+        'app_settings',
+        jsonEncode(
+          AppSettings.defaults(
+            captureDirectory: captureDirectory.path,
+          ).copyWith(apiKeyCiphertext: 'test-ciphertext').toJson(),
+        ),
+      );
 
       const methodChannel = MethodChannel(
         'qi_day_flow/test/queue-controller-methods',
@@ -115,7 +124,23 @@ void main() {
           platform: native,
           defaultCaptureDirectory: captureDirectory.path,
         ),
-        evidenceStore: EvidenceStore(nativeService: native),
+        evidenceStore: EvidenceStore(
+          renameArtifact: (source, destination) async {
+            if (!evidenceDeleteEntered.isCompleted) {
+              evidenceDeleteEntered.complete();
+              await releaseEvidenceDelete.future;
+            }
+            final type = await FileSystemEntity.type(
+              source,
+              followLinks: false,
+            );
+            if (type == FileSystemEntityType.directory) {
+              await Directory(source).rename(destination);
+            } else {
+              await File(source).rename(destination);
+            }
+          },
+        ),
       );
       addTearDown(() async {
         controller.dispose();
@@ -233,11 +258,23 @@ void main() {
       final concurrentRetry = controller
           .retryAnalysisQueueItem(failedItem)
           .whenComplete(() => retryCompleted = true);
+      var cacheCleanupCompleted = false;
+      Object? cacheCleanupError;
+      final concurrentCacheCleanup = controller
+          .clearCompletedVideos()
+          .onError((error, _) {
+            cacheCleanupError = error;
+          })
+          .whenComplete(() => cacheCleanupCompleted = true);
       await Future<void>.delayed(const Duration(milliseconds: 20));
       expect(retryCompleted, isFalse);
+      expect(cacheCleanupCompleted, isFalse);
       releaseEvidenceDelete.complete();
       expect(await deletion, isTrue);
       expect(await concurrentRetry, isFalse);
+      await concurrentCacheCleanup;
+      expect(cacheCleanupCompleted, isTrue);
+      expect(cacheCleanupError, isA<StateError>());
       await controller.refreshAnalysisQueue();
       expect(
         controller.analysisQueue.items.any(
@@ -296,7 +333,11 @@ void main() {
 
       expect(controller.section, AppSection.analysisQueue);
       expect(controller.analysisQueue.pendingCount, 2);
-      expect(controller.pendingChunkCount, 3);
+      expect(
+        controller.pendingChunkCount,
+        controller.analysisQueue.processingCount +
+            controller.analysisQueue.pendingCount,
+      );
     },
   );
 }

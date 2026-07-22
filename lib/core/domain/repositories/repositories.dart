@@ -172,6 +172,8 @@ abstract interface class DailyReportJobRepository {
 
   Future<DailyReportJob?> claimNextDailyReportJob();
 
+  Future<DailyReportJob?> claimPendingDailyReportJob(String reportDate);
+
   Future<bool> completeDailyReportJob(String reportDate);
 
   Future<bool> markDailyReportJobFailed(

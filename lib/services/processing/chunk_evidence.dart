@@ -600,10 +600,448 @@ final class _WindowEvidence {
   final List<WindowResourceSample> resourceSamples;
 }
 
+typedef EvidenceArtifactRename =
+    Future<void> Function(String source, String destination);
+typedef EvidenceQuarantineRename =
+    Future<void> Function(String source, String destination);
+typedef EvidenceChunkRecordsExist = Future<bool> Function(List<int> chunkIds);
+typedef EvidenceQuarantinePurge = Future<void> Function(String path);
+
 class EvidenceStore {
-  const EvidenceStore({this.nativeService});
+  const EvidenceStore({
+    this.nativeService,
+    this.renameArtifact,
+    this.renameQuarantine,
+    this.purgeQuarantine,
+  });
+
+  static const String cleanupDirectoryName = '.cleanup-quarantine';
+  static const String _cleanupManifestName = 'manifest.json';
 
   final NativeCaptureService? nativeService;
+  final EvidenceArtifactRename? renameArtifact;
+  final EvidenceQuarantineRename? renameQuarantine;
+  final EvidenceQuarantinePurge? purgeQuarantine;
+
+  Future<FailedEvidenceCleanupResult> deleteFailedEvidence({
+    required Iterable<CaptureChunk> chunks,
+    required String allowedCaptureRoot,
+    required Future<bool> Function() deleteDatabaseRecords,
+  }) async {
+    _EvidenceQuarantine? quarantine;
+    try {
+      quarantine = await _stageEvidence(
+        chunks: chunks,
+        allowedCaptureRoot: allowedCaptureRoot,
+      );
+      if (quarantine == null) {
+        return const FailedEvidenceCleanupResult.retained('证据路径或配对关系未通过校验');
+      }
+    } on Object catch (error) {
+      return FailedEvidenceCleanupResult.retained(error.toString());
+    }
+
+    String readyPath;
+    try {
+      readyPath = await _commitQuarantine(quarantine);
+    } on Object catch (error) {
+      return _rollbackAsRetained(quarantine, error.toString());
+    }
+
+    bool databaseDeleted;
+    try {
+      databaseDeleted = await deleteDatabaseRecords();
+    } on Object catch (error) {
+      return _rollbackAsRetained(quarantine, error.toString());
+    }
+    if (!databaseDeleted) {
+      return _rollbackAsRetained(quarantine, '数据库中的失败任务未删除');
+    }
+
+    try {
+      await _purgeDirectory(readyPath);
+      await _deleteEmptyOwnedDirectories(quarantine.groups);
+      return const FailedEvidenceCleanupResult.deleted();
+    } on Object catch (error) {
+      return FailedEvidenceCleanupResult.quarantineRetained(error.toString());
+    }
+  }
+
+  Future<EvidenceCleanupRecoveryResult> retryPendingCleanup(
+    String allowedCaptureRoot, {
+    required EvidenceChunkRecordsExist hasAnyChunkRecords,
+  }) async {
+    final root = p.normalize(p.absolute(allowedCaptureRoot));
+    final rootDirectory = Directory(root);
+    if (!await rootDirectory.exists()) {
+      return const EvidenceCleanupRecoveryResult();
+    }
+    final resolvedRoot = p.normalize(
+      await rootDirectory.resolveSymbolicLinks(),
+    );
+    final cleanupRoot = Directory(p.join(root, cleanupDirectoryName));
+    final type = await FileSystemEntity.type(
+      cleanupRoot.path,
+      followLinks: false,
+    );
+    if (type == FileSystemEntityType.notFound) {
+      return const EvidenceCleanupRecoveryResult();
+    }
+    if (type != FileSystemEntityType.directory ||
+        !await _existingDirectoryIsWithin(cleanupRoot.path, resolvedRoot)) {
+      return const EvidenceCleanupRecoveryResult(failedDirectories: 1);
+    }
+
+    var deleted = 0;
+    var failed = 0;
+    await for (final entity in cleanupRoot.list(followLinks: false)) {
+      if (entity is! Directory) continue;
+      final name = p.basename(entity.path);
+      final isReady = name.startsWith('ready-');
+      final isStaging = name.startsWith('staging-');
+      if (!isReady && !isStaging) continue;
+      try {
+        await _reconcileCleanupDirectory(
+          directory: entity,
+          root: root,
+          resolvedRoot: resolvedRoot,
+          hasAnyChunkRecords: hasAnyChunkRecords,
+        );
+        deleted++;
+      } on Object {
+        failed++;
+      }
+    }
+    try {
+      if (await cleanupRoot.exists() && await cleanupRoot.list().isEmpty) {
+        await cleanupRoot.delete();
+      }
+    } on FileSystemException {
+      // A concurrent cleanup may still be using the managed root.
+    }
+    return EvidenceCleanupRecoveryResult(
+      deletedDirectories: deleted,
+      failedDirectories: failed,
+    );
+  }
+
+  Future<void> _reconcileCleanupDirectory({
+    required Directory directory,
+    required String root,
+    required String resolvedRoot,
+    required EvidenceChunkRecordsExist hasAnyChunkRecords,
+  }) async {
+    if (!await _existingDirectoryIsWithin(directory.path, resolvedRoot)) {
+      throw FileSystemException('清理目录越过了受管理根目录', directory.path);
+    }
+    final resolvedDirectory = p.normalize(
+      await directory.resolveSymbolicLinks(),
+    );
+    final manifest = await _readCleanupManifest(directory, root);
+    if (!await hasAnyChunkRecords(manifest.chunkIds)) {
+      await _purgeDirectory(directory.path);
+      return;
+    }
+
+    for (final move in manifest.moves.reversed) {
+      final quarantineType = await FileSystemEntity.type(
+        move.quarantinePath,
+        followLinks: false,
+      );
+      if (quarantineType == FileSystemEntityType.notFound) continue;
+      if (quarantineType != FileSystemEntityType.file) {
+        throw FileSystemException('隔离证据不是常规文件', move.quarantinePath);
+      }
+      final resolvedQuarantine = p.normalize(
+        await File(move.quarantinePath).resolveSymbolicLinks(),
+      );
+      if (!p.isWithin(resolvedDirectory, resolvedQuarantine)) {
+        throw FileSystemException('隔离证据越过了清理目录', move.quarantinePath);
+      }
+      if (await FileSystemEntity.type(move.source, followLinks: false) !=
+          FileSystemEntityType.notFound) {
+        throw FileSystemException('原证据路径已被占用', move.source);
+      }
+      await _ensureManagedDirectory(
+        Directory(p.dirname(move.source)),
+        resolvedRoot,
+      );
+      await _rename(move.quarantinePath, move.source);
+    }
+    await _purgeDirectory(directory.path);
+  }
+
+  Future<_CleanupManifest> _readCleanupManifest(
+    Directory directory,
+    String root,
+  ) async {
+    final file = File(p.join(directory.path, _cleanupManifestName));
+    final decoded = jsonDecode(await file.readAsString());
+    if (decoded is! Map<String, dynamic> || decoded['version'] != 1) {
+      throw const FormatException('清理清单版本无效');
+    }
+    final rawIds = decoded['chunk_ids'];
+    final rawMoves = decoded['moves'];
+    if (rawIds is! List || rawMoves is! List) {
+      throw const FormatException('清理清单结构无效');
+    }
+    final chunkIds = rawIds.whereType<int>().toList(growable: false);
+    if (chunkIds.length != rawIds.length || chunkIds.isEmpty) {
+      throw const FormatException('清理清单任务 ID 无效');
+    }
+    final moves = <_EvidenceMove>[];
+    final sourcePaths = <String>{};
+    final quarantinePaths = <String>{};
+    for (final rawMove in rawMoves) {
+      if (rawMove is! Map<String, dynamic> ||
+          rawMove['source'] is! String ||
+          rawMove['quarantine'] is! String) {
+        throw const FormatException('清理清单路径无效');
+      }
+      final rawSource = rawMove['source'] as String;
+      final rawQuarantine = rawMove['quarantine'] as String;
+      if (p.isAbsolute(rawSource) || p.isAbsolute(rawQuarantine)) {
+        throw const FormatException('清理清单路径必须为相对路径');
+      }
+      final source = p.normalize(p.join(root, rawSource));
+      final quarantine = p.normalize(p.join(directory.path, rawQuarantine));
+      if (!p.isWithin(root, source) ||
+          !p.isWithin(directory.path, quarantine) ||
+          p.basename(quarantine) == _cleanupManifestName ||
+          !sourcePaths.add(source.toLowerCase()) ||
+          !quarantinePaths.add(quarantine.toLowerCase())) {
+        throw const FormatException('清理清单路径越界或重复');
+      }
+      moves.add(_EvidenceMove(source: source, quarantinePath: quarantine));
+    }
+    return _CleanupManifest(chunkIds: chunkIds, moves: moves);
+  }
+
+  Future<_EvidenceQuarantine?> _stageEvidence({
+    required Iterable<CaptureChunk> chunks,
+    required String allowedCaptureRoot,
+  }) async {
+    final chunkList = chunks.toList(growable: false);
+    if (chunkList.isEmpty || chunkList.any((chunk) => chunk.id == null)) {
+      return null;
+    }
+    final groups = <_EvidenceArtifactGroup>[];
+    final ownedPaths = <String>{};
+    for (final chunk in chunkList) {
+      final group = await _artifactGroup(
+        chunk: chunk,
+        allowedCaptureRoot: allowedCaptureRoot,
+      );
+      if (group == null) return null;
+      for (final artifactPath in group.artifactPaths) {
+        if (!ownedPaths.add(p.normalize(artifactPath).toLowerCase())) {
+          return null;
+        }
+      }
+      groups.add(group);
+    }
+    if (groups.isEmpty) return null;
+
+    final root = p.normalize(p.absolute(allowedCaptureRoot));
+    final resolvedRoot = groups.first.resolvedRoot;
+    final cleanupRoot = Directory(p.join(root, cleanupDirectoryName));
+    await _ensureManagedDirectory(cleanupRoot, resolvedRoot);
+    final operationId =
+        '${DateTime.now().toUtc().microsecondsSinceEpoch}-${_nextCleanupId++}';
+    final stagingDirectory = Directory(
+      p.join(cleanupRoot.path, 'staging-$operationId'),
+    );
+    await stagingDirectory.create();
+    final moves = <_EvidenceMove>[];
+    final plannedMoves = <_EvidenceMove>[];
+    final quarantine = _EvidenceQuarantine(
+      root: resolvedRoot,
+      stagingPath: stagingDirectory.path,
+      readyPath: p.join(cleanupRoot.path, 'ready-$operationId'),
+      groups: List<_EvidenceArtifactGroup>.unmodifiable(groups),
+      moves: moves,
+    );
+
+    try {
+      for (var groupIndex = 0; groupIndex < groups.length; groupIndex++) {
+        final groupDirectory = Directory(
+          p.join(stagingDirectory.path, 'group-$groupIndex'),
+        );
+        await groupDirectory.create();
+        final group = groups[groupIndex];
+        for (
+          var artifactIndex = 0;
+          artifactIndex < group.artifactPaths.length;
+          artifactIndex++
+        ) {
+          final source = group.artifactPaths[artifactIndex];
+          final type = await FileSystemEntity.type(source, followLinks: false);
+          if (type == FileSystemEntityType.notFound) continue;
+          if (type != FileSystemEntityType.file) {
+            throw FileSystemException('证据不是常规文件', source);
+          }
+          final resolved = p.normalize(
+            await File(source).resolveSymbolicLinks(),
+          );
+          if (!p.isWithin(group.resolvedRoot, resolved)) {
+            throw FileSystemException('证据解析到了受管理目录之外', source);
+          }
+          plannedMoves.add(
+            _EvidenceMove(
+              source: source,
+              quarantinePath: p.join(
+                groupDirectory.path,
+                '$artifactIndex-${p.basename(source)}',
+              ),
+            ),
+          );
+        }
+      }
+      await _writeCleanupManifest(
+        directory: stagingDirectory,
+        root: root,
+        chunkIds: chunkList.map((chunk) => chunk.id).whereType<int>(),
+        moves: plannedMoves,
+      );
+      for (final move in plannedMoves) {
+        await _rename(move.source, move.quarantinePath);
+        moves.add(move);
+      }
+      return quarantine;
+    } on Object {
+      await _rollbackQuarantine(quarantine);
+      rethrow;
+    }
+  }
+
+  Future<void> _writeCleanupManifest({
+    required Directory directory,
+    required String root,
+    required Iterable<int> chunkIds,
+    required List<_EvidenceMove> moves,
+  }) async {
+    final manifest = <String, Object>{
+      'version': 1,
+      'chunk_ids': chunkIds.toList(growable: false),
+      'moves': moves
+          .map(
+            (move) => <String, String>{
+              'source': p.relative(move.source, from: root),
+              'quarantine': p.relative(
+                move.quarantinePath,
+                from: directory.path,
+              ),
+            },
+          )
+          .toList(growable: false),
+    };
+    await File(
+      p.join(directory.path, _cleanupManifestName),
+    ).writeAsString(jsonEncode(manifest), flush: true);
+  }
+
+  Future<FailedEvidenceCleanupResult> _rollbackAsRetained(
+    _EvidenceQuarantine quarantine,
+    String message,
+  ) async {
+    try {
+      await _rollbackQuarantine(quarantine);
+      return FailedEvidenceCleanupResult.retained(message);
+    } on Object catch (rollbackError) {
+      return FailedEvidenceCleanupResult.retained(
+        '$message；隔离证据回滚失败并已保留：$rollbackError',
+      );
+    }
+  }
+
+  Future<void> _rollbackQuarantine(_EvidenceQuarantine quarantine) async {
+    Object? firstFailure;
+    for (final move in quarantine.moves.reversed) {
+      try {
+        final sourceParent = Directory(p.dirname(move.source));
+        await _ensureManagedDirectory(sourceParent, quarantine.root);
+        await _rename(move.quarantinePath, move.source);
+      } on Object catch (error) {
+        firstFailure ??= error;
+      }
+    }
+    if (firstFailure != null) {
+      throw StateError('证据回滚失败：$firstFailure');
+    }
+    try {
+      for (final path in <String>[
+        quarantine.readyPath,
+        quarantine.stagingPath,
+      ]) {
+        final directory = Directory(path);
+        if (await directory.exists()) await directory.delete(recursive: true);
+      }
+    } on Object catch (error) {
+      firstFailure ??= error;
+    }
+    if (firstFailure != null) throw StateError('证据回滚清理失败：$firstFailure');
+  }
+
+  Future<String> _commitQuarantine(_EvidenceQuarantine quarantine) async {
+    final rename = renameQuarantine;
+    if (rename == null) {
+      await Directory(quarantine.stagingPath).rename(quarantine.readyPath);
+    } else {
+      await rename(quarantine.stagingPath, quarantine.readyPath);
+    }
+    for (var index = 0; index < quarantine.moves.length; index++) {
+      final move = quarantine.moves[index];
+      quarantine.moves[index] = _EvidenceMove(
+        source: move.source,
+        quarantinePath: p.join(
+          quarantine.readyPath,
+          p.relative(move.quarantinePath, from: quarantine.stagingPath),
+        ),
+      );
+    }
+    return quarantine.readyPath;
+  }
+
+  Future<void> _deleteEmptyOwnedDirectories(
+    List<_EvidenceArtifactGroup> groups,
+  ) async {
+    for (final group in groups.reversed) {
+      if (group.flatLayout) continue;
+      final directory = Directory(group.directory);
+      if (await directory.exists() && await directory.list().isEmpty) {
+        await directory.delete();
+      }
+    }
+  }
+
+  Future<void> _ensureManagedDirectory(Directory directory, String root) async {
+    final type = await FileSystemEntity.type(
+      directory.path,
+      followLinks: false,
+    );
+    if (type == FileSystemEntityType.notFound) await directory.create();
+    final createdType = await FileSystemEntity.type(
+      directory.path,
+      followLinks: false,
+    );
+    if (createdType != FileSystemEntityType.directory ||
+        !await _existingDirectoryIsWithin(directory.path, root)) {
+      throw FileSystemException('清理隔离目录不安全', directory.path);
+    }
+  }
+
+  Future<void> _rename(String source, String destination) async {
+    final injected = renameArtifact;
+    if (injected != null) return injected(source, destination);
+    await File(source).rename(destination);
+  }
+
+  Future<void> _purgeDirectory(String path) async {
+    final injected = purgeQuarantine;
+    if (injected != null) return injected(path);
+    final directory = Directory(path);
+    if (await directory.exists()) await directory.delete(recursive: true);
+  }
 
   Future<EvidenceDeletionResult> deleteEvidenceGroup({
     required CaptureChunk chunk,
@@ -714,6 +1152,7 @@ class EvidenceStore {
       }
       return _EvidenceArtifactGroup(
         root: root,
+        resolvedRoot: resolvedRoot,
         directory: directory,
         metadataPath: metadataPath,
         videoPath: videoPath,
@@ -730,6 +1169,7 @@ class EvidenceStore {
       if (!await Directory(directory).exists()) {
         return _EvidenceArtifactGroup(
           root: root,
+          resolvedRoot: resolvedRoot,
           directory: directory,
           metadataPath: metadataPath,
           framePaths: const <String>[],
@@ -770,6 +1210,7 @@ class EvidenceStore {
     }
     return _EvidenceArtifactGroup(
       root: root,
+      resolvedRoot: resolvedRoot,
       directory: directory,
       metadataPath: metadataPath,
       framePaths: List<String>.unmodifiable(framePaths),
@@ -836,6 +1277,67 @@ class EvidenceStore {
   }
 }
 
+int _nextCleanupId = 0;
+
+final class FailedEvidenceCleanupResult {
+  const FailedEvidenceCleanupResult.deleted()
+    : deleted = true,
+      quarantineRetained = false,
+      message = null;
+
+  const FailedEvidenceCleanupResult.quarantineRetained(this.message)
+    : deleted = true,
+      quarantineRetained = true;
+
+  const FailedEvidenceCleanupResult.retained(this.message)
+    : deleted = false,
+      quarantineRetained = false;
+
+  final bool deleted;
+  final bool quarantineRetained;
+  final String? message;
+}
+
+final class EvidenceCleanupRecoveryResult {
+  const EvidenceCleanupRecoveryResult({
+    this.deletedDirectories = 0,
+    this.failedDirectories = 0,
+  });
+
+  final int deletedDirectories;
+  final int failedDirectories;
+}
+
+final class _CleanupManifest {
+  const _CleanupManifest({required this.chunkIds, required this.moves});
+
+  final List<int> chunkIds;
+  final List<_EvidenceMove> moves;
+}
+
+final class _EvidenceQuarantine {
+  const _EvidenceQuarantine({
+    required this.root,
+    required this.stagingPath,
+    required this.readyPath,
+    required this.groups,
+    required this.moves,
+  });
+
+  final String root;
+  final String stagingPath;
+  final String readyPath;
+  final List<_EvidenceArtifactGroup> groups;
+  final List<_EvidenceMove> moves;
+}
+
+final class _EvidenceMove {
+  const _EvidenceMove({required this.source, required this.quarantinePath});
+
+  final String source;
+  final String quarantinePath;
+}
+
 final class EvidenceDeletionResult {
   const EvidenceDeletionResult.deleted()
     : deleted = true,
@@ -858,6 +1360,7 @@ final class EvidenceDeletionResult {
 final class _EvidenceArtifactGroup {
   const _EvidenceArtifactGroup({
     required this.root,
+    required this.resolvedRoot,
     required this.directory,
     required this.metadataPath,
     this.videoPath,
@@ -866,6 +1369,7 @@ final class _EvidenceArtifactGroup {
   });
 
   final String root;
+  final String resolvedRoot;
   final String directory;
   final String metadataPath;
   final String? videoPath;

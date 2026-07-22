@@ -165,6 +165,57 @@ void main() {
     expect(harness.analysisServiceBuilds, isEmpty);
   });
 
+  test(
+    'initialize completes a fresh non-empty report without an API key',
+    () async {
+      final harness = await _ControllerHarness.create(
+        withApiKey: 1 == 0,
+        useRealDailyReportService: true,
+      );
+      addTearDown(harness.close);
+      await _seedFailedAnalysisWithTimelineCard(harness);
+      await harness.repository.enqueueDailyReportJob('2026-07-13');
+      await harness.repository.claimPendingDailyReportJob('2026-07-13');
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+      await harness.repository.saveDailyReport(
+        reportDate: '2026-07-13',
+        content: '已落盘日报',
+        model: 'gpt-5.4-mini|daily-v1',
+      );
+
+      await harness.initialize();
+      await _waitUntil(
+        () async =>
+            await harness.repository.getDailyReportJob('2026-07-13') == null,
+      );
+
+      expect(
+        (await harness.repository.getDailyReport('2026-07-13'))?.content,
+        '已落盘日报',
+      );
+      expect(harness.analysisServiceBuilds, isEmpty);
+    },
+  );
+
+  test(
+    'initialize keeps a non-empty report pending without an API key',
+    () async {
+      final harness = await _ControllerHarness.create(withApiKey: false);
+      addTearDown(harness.close);
+      await _seedFailedAnalysisWithTimelineCard(harness);
+      await harness.repository.enqueueDailyReportJob('2026-07-13');
+      await harness.repository.claimPendingDailyReportJob('2026-07-13');
+
+      await harness.initialize();
+
+      final job = await harness.repository.getDailyReportJob('2026-07-13');
+      expect(job?.status, DailyReportJobStatus.pending);
+      expect(harness.reportService.generateCalls, 0);
+      expect(harness.analysisServiceBuilds, isEmpty);
+      expect(harness.controller.statusMessage, contains('API 密钥'));
+    },
+  );
+
   test('initialize recovers an interrupted report and schedules it', () async {
     final harness = await _ControllerHarness.create();
     addTearDown(harness.close);
@@ -179,6 +230,78 @@ void main() {
           await harness.repository.getDailyReportJob('2026-07-13') == null,
     );
     expect(harness.reportService.generateCalls, 1);
+  });
+
+  test(
+    'without an API key retries only empty reports and preserves other failures',
+    () async {
+      final harness = await _ControllerHarness.create(withApiKey: false);
+      addTearDown(harness.close);
+      await harness.initialize();
+      final batch = await _seedFailedAnalysisWithTimelineCard(harness);
+      await harness.repository.enqueueDailyReportJob('2026-07-13');
+      await harness.repository.claimPendingDailyReportJob('2026-07-13');
+      await harness.repository.markDailyReportJobFailed(
+        '2026-07-13',
+        category: 'provider',
+        summary: 'provider failed',
+      );
+      await harness.controller.refreshAnalysisQueue();
+
+      final reportItem = harness.controller.analysisQueue.items.singleWhere(
+        (item) => item.reportDate == '2026-07-13',
+      );
+      final analysisItem = harness.controller.analysisQueue.items.singleWhere(
+        (item) => item.batchId == batch.id,
+      );
+      final reportBefore = await harness.repository.getDailyReportJob(
+        '2026-07-13',
+      );
+
+      expect(
+        await harness.controller.retryAnalysisQueueItem(reportItem),
+        isFalse,
+      );
+      expect(
+        await harness.controller.retryAnalysisQueueItem(analysisItem),
+        isFalse,
+      );
+      await harness.controller.retryFailedChunks();
+
+      final reportAfter = await harness.repository.getDailyReportJob(
+        '2026-07-13',
+      );
+      expect(reportAfter?.status, DailyReportJobStatus.failed);
+      expect(reportAfter?.retryCount, reportBefore?.retryCount);
+      expect(
+        (await harness.repository.getBatch(batch.id!))?.status,
+        ProcessingStatus.failed,
+      );
+      expect(harness.controller.section, AppSection.settings);
+      expect(harness.reportService.generateCalls, 0);
+    },
+  );
+
+  test('without an API key global retry still runs an empty report', () async {
+    final harness = await _ControllerHarness.create(withApiKey: false);
+    addTearDown(harness.close);
+    await harness.initialize();
+    await harness.repository.enqueueDailyReportJob('2026-07-13');
+    await harness.repository.claimPendingDailyReportJob('2026-07-13');
+    await harness.repository.markDailyReportJobFailed(
+      '2026-07-13',
+      category: 'provider',
+      summary: 'provider failed',
+    );
+
+    await harness.controller.retryFailedChunks();
+    await _waitUntil(
+      () async =>
+          await harness.repository.getDailyReportJob('2026-07-13') == null,
+    );
+
+    expect(harness.reportService.generateCalls, 1);
+    expect(harness.analysisServiceBuilds, isEmpty);
   });
 
   test('late report load cannot overwrite a newer timeline date', () async {
@@ -208,6 +331,58 @@ void main() {
     expect(harness.controller.dailyReport, '新日期日报');
     expect(harness.controller.reportLoading, isFalse);
   });
+}
+
+Future<AnalysisBatch> _seedFailedAnalysisWithTimelineCard(
+  _ControllerHarness harness,
+) async {
+  final now = DateTime(2026, 7, 13, 9).millisecondsSinceEpoch;
+  final session = await harness.repository.createSession(
+    CaptureSession(
+      captureScope: 'active-window-display',
+      captureDirectory: p.join(harness.root.path, 'captures'),
+      startedAtMs: now,
+      endedAtMs: now + 60000,
+      status: CaptureSessionStatus.stopped,
+      createdAtMs: now,
+      updatedAtMs: now,
+    ),
+  );
+  final chunk = await harness.repository.addChunk(
+    CaptureChunk(
+      sessionId: session.id!,
+      framesDirectory: p.join(harness.root.path, 'captures', 'chunk'),
+      metadataPath: p.join(harness.root.path, 'captures', 'chunk.json'),
+      videoPath: p.join(harness.root.path, 'captures', 'chunk.mp4'),
+      startedAtMs: now,
+      endedAtMs: now + 60000,
+      frameCount: 1,
+      status: ProcessingStatus.pending,
+      createdAtMs: now,
+      updatedAtMs: now,
+    ),
+  );
+  final batch = await harness.repository.claimChunksForAnalysis(<int>[
+    chunk.id!,
+  ]);
+  await harness.repository.markAnalysisFailed(batch.id!, 'provider failed');
+  final sqlite = await harness.database.open();
+  await sqlite.insert('timeline_cards', <String, Object?>{
+    'batch_id': batch.id,
+    'ordinal': 0,
+    'report_date': '2026-07-13',
+    'category': '开发',
+    'title': '实现功能',
+    'summary': '非空日期',
+    'started_at_ms': now,
+    'ended_at_ms': now + 60000,
+    'app_usages_json': '[]',
+    'distractions_json': '[]',
+    'productivity_score': 80.0,
+    'created_at_ms': now,
+    'updated_at_ms': now,
+  });
+  return batch;
 }
 
 final class _ControllerHarness {

@@ -100,6 +100,21 @@ void main() {
     );
   });
 
+  test('claims only the requested pending report date', () async {
+    await repository.enqueueDailyReportJob('2026-07-13');
+    await repository.enqueueDailyReportJob('2026-07-14');
+
+    final claimed = await repository.claimPendingDailyReportJob('2026-07-14');
+
+    expect(claimed?.reportDate, '2026-07-14');
+    expect(claimed?.status, DailyReportJobStatus.processing);
+    expect(await repository.claimPendingDailyReportJob('2026-07-14'), isNull);
+    expect(
+      (await repository.getDailyReportJob('2026-07-13'))?.status,
+      DailyReportJobStatus.pending,
+    );
+  });
+
   test('processing jobs recover to pending after restart', () async {
     await repository.enqueueDailyReportJob('2026-07-13');
     await repository.claimNextDailyReportJob();

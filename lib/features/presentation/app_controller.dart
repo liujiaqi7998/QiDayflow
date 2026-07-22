@@ -301,15 +301,20 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
       await _runInitializationHook(AppInitializationStage.beforeDerivedRefresh);
       await _rotateCache();
       await _refreshDerivedData();
+      var reportsBlockedWithoutKey = false;
       if (_hasApiKey) {
         _analysisCoordinator.schedule();
       } else {
-        _analysisCoordinator.scheduleDailyReportsOnly();
+        reportsBlockedWithoutKey = await _scheduleEmptyPendingReports();
       }
       if (recovery.sessionsFailed + recovery.chunksFailed > 0) {
         _setMessage('已恢复上次中断的采集与分析任务，原始证据保持不变');
       } else if (recoveredReportJobs > 0) {
-        _setMessage('已恢复上次中断的日报任务，将在后台继续生成');
+        _setMessage(
+          reportsBlockedWithoutKey
+              ? '已恢复上次中断的日报任务；非空日报需配置 API 密钥后重试'
+              : '已恢复上次中断的日报任务，将在后台继续生成',
+        );
       }
       _refreshTimer = Timer.periodic(_maintenanceInterval, (_) {
         unawaited(_runPeriodicMaintenance());
@@ -626,12 +631,34 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
       if (_hasApiKey) {
         _analysisCoordinator.schedule();
       } else {
-        _analysisCoordinator.scheduleDailyReportsOnly();
+        await _analysisCoordinator.schedulePendingDailyReport(reportDate);
       }
       unawaited(refreshAnalysisQueue());
     } on Object catch (error) {
       _setMessage('日报任务入队失败：${error.runtimeType}');
     }
+  }
+
+  Future<bool> _scheduleEmptyPendingReports() async {
+    var blocked = false;
+    final jobs = await _repository.listDailyReportJobs();
+    for (final job in jobs) {
+      if (job.status != DailyReportJobStatus.pending) continue;
+      if (await _dailyReportService.hasFreshReportGeneratedSince(
+        job.reportDate,
+        job.requestedAtMs,
+      )) {
+        await _analysisCoordinator.schedulePendingDailyReport(job.reportDate);
+        continue;
+      }
+      final cards = await _repository.listCardsForReportDate(job.reportDate);
+      if (cards.isEmpty) {
+        await _analysisCoordinator.schedulePendingDailyReport(job.reportDate);
+      } else {
+        blocked = true;
+      }
+    }
+    return blocked;
   }
 
   @override
@@ -795,7 +822,11 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
   );
 
   @override
-  Future<void> clearCompletedVideos() async {
+  Future<void> clearCompletedVideos() {
+    return _serializeAnalysisQueueMutation(_clearCompletedVideos);
+  }
+
+  Future<void> _clearCompletedVideos() async {
     final result = await _cacheRotationService.clearCompletedVideos(
       captureDirectory: _runtimeSettings.captureDirectory,
     );
@@ -896,14 +927,51 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
 
   @override
   Future<void> retryFailedChunks() {
-    return _serializeAnalysisQueueMutation(_analysisCoordinator.retryFailed);
+    return _serializeAnalysisQueueMutation(() async {
+      if (_hasApiKey) {
+        await _analysisCoordinator.retryFailed();
+        return;
+      }
+
+      var blocked = false;
+      final queueEntries = await _repository.listAnalysisQueue();
+      blocked = queueEntries.any(
+        (entry) => entry.status == ProcessingStatus.failed,
+      );
+      final reportJobs = await _repository.listDailyReportJobs();
+      for (final job in reportJobs) {
+        if (job.status != DailyReportJobStatus.failed) continue;
+        final cards = await _repository.listCardsForReportDate(job.reportDate);
+        if (cards.isNotEmpty) {
+          blocked = true;
+          continue;
+        }
+        await _analysisCoordinator.retryFailedItem(
+          chunkId: null,
+          reportDate: job.reportDate,
+        );
+      }
+      if (blocked) {
+        _showRetryApiKeyRequired();
+      }
+    });
   }
 
   @override
   Future<bool> retryAnalysisQueueItem(AnalysisQueueItemViewData item) {
-    return _serializeAnalysisQueueMutation(() {
-      if (item.status != ProcessingStatus.failed) {
-        return Future<bool>.value(false);
+    return _serializeAnalysisQueueMutation(() async {
+      if (item.status != ProcessingStatus.failed) return false;
+      if (!_hasApiKey) {
+        final reportDate = item.reportDate;
+        if (reportDate == null) {
+          _showRetryApiKeyRequired();
+          return false;
+        }
+        final cards = await _repository.listCardsForReportDate(reportDate);
+        if (cards.isNotEmpty) {
+          _showRetryApiKeyRequired();
+          return false;
+        }
       }
       return _analysisCoordinator.retryFailedItem(
         chunkId: item.chunkId,
@@ -911,6 +979,11 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
         reportDate: item.reportDate,
       );
     });
+  }
+
+  void _showRetryApiKeyRequired() {
+    section = AppSection.settings;
+    _setMessage('重试分析任务和非空日报前需要配置 API 密钥');
   }
 
   @override
@@ -936,32 +1009,40 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
         batch.chunkIds.map(_repository.getChunk),
       );
       if (chunks.any(
-            (chunk) => chunk == null || chunk.status != ProcessingStatus.failed,
-          ) ||
-          !await _deleteEvidence(chunks.whereType<CaptureChunk>())) {
+        (chunk) => chunk == null || chunk.status != ProcessingStatus.failed,
+      )) {
         return false;
       }
-      return _repository.deleteFailedBatch(batchId);
+      return _deleteEvidence(
+        chunks.whereType<CaptureChunk>(),
+        () => _repository.deleteFailedBatch(batchId),
+      );
     }
     final chunkId = item.chunkId;
     if (chunkId == null) return false;
     final chunk = await _repository.getChunk(chunkId);
     if (chunk == null || chunk.status != ProcessingStatus.failed) return false;
-    if (!await _deleteEvidence(<CaptureChunk>[chunk])) return false;
-    return _repository.deleteFailedChunk(chunkId);
+    return _deleteEvidence(<CaptureChunk>[
+      chunk,
+    ], () => _repository.deleteFailedChunk(chunkId));
   }
 
-  Future<bool> _deleteEvidence(Iterable<CaptureChunk> chunks) async {
+  Future<bool> _deleteEvidence(
+    Iterable<CaptureChunk> chunks,
+    Future<bool> Function() deleteDatabaseRecords,
+  ) async {
     final captureRoot = p.windows.join(_activeUserDataDirectory, 'captures');
-    for (final chunk in chunks) {
-      final result = await _evidenceStore.deleteEvidenceGroup(
-        chunk: chunk,
-        allowedCaptureRoot: captureRoot,
-      );
-      if (!result.deleted) {
-        _setMessage('删除失败：证据文件未能安全清理，任务已保留');
-        return false;
-      }
+    final result = await _evidenceStore.deleteFailedEvidence(
+      chunks: chunks,
+      allowedCaptureRoot: captureRoot,
+      deleteDatabaseRecords: deleteDatabaseRecords,
+    );
+    if (!result.deleted) {
+      _setMessage('删除失败：证据文件未能安全清理，任务已保留');
+      return false;
+    }
+    if (result.quarantineRetained) {
+      _setMessage('任务已删除；证据已隔离，后台清理将在稍后重试');
     }
     return true;
   }
@@ -1277,8 +1358,14 @@ class AppController extends ChangeNotifier implements QiDayFlowViewModel {
     }
   }
 
-  Future<CacheRotationResult?> _rotateCache({
-    bool announceBlocked = false,
+  Future<CacheRotationResult?> _rotateCache({bool announceBlocked = false}) {
+    return _serializeAnalysisQueueMutation(
+      () => _rotateCacheNow(announceBlocked: announceBlocked),
+    );
+  }
+
+  Future<CacheRotationResult?> _rotateCacheNow({
+    required bool announceBlocked,
   }) async {
     if (_exiting) {
       return null;

@@ -313,11 +313,11 @@ void main() {
       expect(releaseReport.isCompleted, isFalse);
     } finally {
       if (!releaseReport.isCompleted) releaseReport.complete();
+      await _waitUntil(
+        () async => await repository.getDailyReportJob('2026-07-13') == null,
+      );
       await worker.stop();
     }
-    await _waitUntil(
-      () async => await repository.getDailyReportJob('2026-07-13') == null,
-    );
   });
 
   test('fresh chunk work is drained before a report job', () async {
@@ -443,6 +443,10 @@ final class _GatedDailyReportJobRepository implements DailyReportJobRepository {
     await releaseClaim.future;
     return delegate.claimNextDailyReportJob();
   }
+
+  @override
+  Future<DailyReportJob?> claimPendingDailyReportJob(String reportDate) =>
+      delegate.claimPendingDailyReportJob(reportDate);
 
   @override
   Future<bool> completeDailyReportJob(String reportDate) =>

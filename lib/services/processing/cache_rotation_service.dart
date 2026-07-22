@@ -81,13 +81,31 @@ final class CacheRotationService {
     return operation;
   }
 
+  Future<EvidenceCleanupRecoveryResult> _retryEvidenceCleanup(
+    String captureDirectory,
+  ) {
+    return _evidenceStore.retryPendingCleanup(
+      captureDirectory,
+      hasAnyChunkRecords: (chunkIds) async {
+        for (final chunkId in chunkIds) {
+          if (await _captureRepository.getChunk(chunkId) != null) return true;
+        }
+        return false;
+      },
+    );
+  }
+
   Future<CompletedVideoClearResult> _clearCompletedVideos({
     required String captureDirectory,
   }) async {
+    final cleanup = await _retryEvidenceCleanup(captureDirectory);
     final initialBytes = await _evidenceStore.sizeOf(captureDirectory);
     final deletedIds = <int>[];
     final skippedIds = <int>[];
     final messages = <String>[];
+    if (cleanup.failedDirectories > 0) {
+      messages.add('有 ${cleanup.failedDirectories} 个证据清理任务需要稍后重试');
+    }
     final candidates =
         (await _captureRepository.listChunks(
             statuses: const <ProcessingStatus>{ProcessingStatus.completed},
@@ -136,11 +154,15 @@ final class CacheRotationService {
     required String captureDirectory,
     required int limitBytes,
   }) async {
+    final cleanup = await _retryEvidenceCleanup(captureDirectory);
     final initialBytes = await _evidenceStore.sizeOf(captureDirectory);
     var currentBytes = initialBytes;
     final purgedIds = <int>[];
     final skippedIds = <int>[];
     final messages = <String>[];
+    if (cleanup.failedDirectories > 0) {
+      messages.add('有 ${cleanup.failedDirectories} 个证据清理任务需要稍后重试');
+    }
 
     if (currentBytes >= limitBytes) {
       final candidates = await _captureRepository.listChunks(

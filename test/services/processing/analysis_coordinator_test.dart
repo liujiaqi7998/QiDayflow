@@ -551,6 +551,193 @@ void main() {
     expect(repository.batchPageLimits, isEmpty);
     expect(repository.standalonePageLimits, isEmpty);
   });
+
+  test(
+    'normal report-only and targeted requests share one report executor',
+    () async {
+      final repository =
+          _ReportSchedulingRepository(<String, DailyReportJobStatus>{
+            '2026-07-10': DailyReportJobStatus.pending,
+            '2026-07-11': DailyReportJobStatus.pending,
+            '2026-07-12': DailyReportJobStatus.failed,
+          });
+      final generator = _GatedReportGenerator();
+      final coordinator = AnalysisCoordinator(
+        captureRepository: repository,
+        analysisRepository: repository,
+        timelineRepository: repository,
+        dailyReportJobRepository: repository,
+        reportGenerator: generator.call,
+        reportIsFresh: (_) async => false,
+        evidenceReader: const _EmptyEvidenceReader(),
+        serviceFactory: () async => throw StateError('must not analyze chunks'),
+      );
+
+      coordinator.schedule();
+      coordinator.scheduleDailyReportsOnly();
+      expect(
+        await coordinator.retryFailedItem(
+          chunkId: null,
+          reportDate: '2026-07-12',
+        ),
+        isTrue,
+      );
+      await generator.firstEntered.future.timeout(const Duration(seconds: 2));
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+
+      expect(generator.maxActive, 1);
+      generator.release();
+      await _waitUntil(() => repository.completedDates.length == 3);
+      await coordinator.stop();
+
+      expect(generator.maxActive, 1);
+      expect(generator.runCounts.values, everyElement(1));
+      expect(repository.claimCounts.values, everyElement(1));
+      expect(repository.completedDates.toSet(), <String>{
+        '2026-07-10',
+        '2026-07-11',
+        '2026-07-12',
+      });
+      expect(repository.claimedChunkIds, isEmpty);
+    },
+  );
+
+  test('report-only scheduling never claims chunks', () async {
+    final repository = _ReportSchedulingRepository(
+      <String, DailyReportJobStatus>{
+        '2026-07-10': DailyReportJobStatus.pending,
+      },
+    );
+    final coordinator = AnalysisCoordinator(
+      captureRepository: repository,
+      analysisRepository: repository,
+      timelineRepository: repository,
+      dailyReportJobRepository: repository,
+      reportGenerator: (_) async {},
+      reportIsFresh: (_) async => false,
+      evidenceReader: const _EmptyEvidenceReader(),
+      serviceFactory: () async => throw StateError('must not analyze chunks'),
+    );
+
+    coordinator.scheduleDailyReportsOnly();
+    await _waitUntil(() => repository.completedDates.isNotEmpty);
+    await coordinator.stop();
+
+    expect(repository.completedDates, <String>['2026-07-10']);
+    expect(repository.claimedChunkIds, isEmpty);
+  });
+
+  test('stop waits for an in-flight follow-up queue probe', () async {
+    final repository =
+        _ReportSchedulingRepository(<String, DailyReportJobStatus>{})
+          ..listChunksGateAfterCall = 1
+          ..listChunksGate = Completer<void>();
+    final coordinator = AnalysisCoordinator(
+      captureRepository: repository,
+      analysisRepository: repository,
+      timelineRepository: repository,
+      dailyReportJobRepository: repository,
+      reportGenerator: (_) async {},
+      reportIsFresh: (_) async => false,
+      evidenceReader: const _EmptyEvidenceReader(),
+      serviceFactory: () async => throw StateError('must not analyze chunks'),
+    );
+
+    coordinator.schedule();
+    await repository.listChunksGateEntered.future.timeout(
+      const Duration(seconds: 2),
+    );
+    expect(repository.listChunksCalls, 2);
+
+    var stopped = false;
+    final stopping = coordinator.stop().then((_) => stopped = true);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(stopped, isFalse);
+    repository.listChunksGate!.complete();
+    await stopping;
+    expect(stopped, isTrue);
+  });
+
+  test('stop waits for an in-flight targeted report claim', () async {
+    final repository = _ReportSchedulingRepository(
+      <String, DailyReportJobStatus>{
+        '2026-07-10': DailyReportJobStatus.pending,
+      },
+    )..claimPendingGate = Completer<void>();
+    final coordinator = AnalysisCoordinator(
+      captureRepository: repository,
+      analysisRepository: repository,
+      timelineRepository: repository,
+      dailyReportJobRepository: repository,
+      reportGenerator: (_) async {},
+      reportIsFresh: (_) async => false,
+      evidenceReader: const _EmptyEvidenceReader(),
+      serviceFactory: () async => throw StateError('must not analyze chunks'),
+    );
+
+    final scheduling = coordinator.schedulePendingDailyReport('2026-07-10');
+    await repository.claimPendingGateEntered.future.timeout(
+      const Duration(seconds: 2),
+    );
+    var stopped = false;
+    final stopping = coordinator.stop().then((_) => stopped = true);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(stopped, isFalse);
+
+    repository.claimPendingGate!.complete();
+    expect(await scheduling, isFalse);
+    await stopping;
+    expect(stopped, isTrue);
+    expect(repository.jobs['2026-07-10']?.status, DailyReportJobStatus.pending);
+  });
+
+  test('stop requeues active and queued targeted reports', () async {
+    final repository =
+        _ReportSchedulingRepository(<String, DailyReportJobStatus>{
+          '2026-07-10': DailyReportJobStatus.failed,
+          '2026-07-11': DailyReportJobStatus.failed,
+        });
+    final generator = _GatedReportGenerator();
+    final coordinator = AnalysisCoordinator(
+      captureRepository: repository,
+      analysisRepository: repository,
+      timelineRepository: repository,
+      dailyReportJobRepository: repository,
+      reportGenerator: generator.call,
+      reportIsFresh: (_) async => false,
+      evidenceReader: const _EmptyEvidenceReader(),
+      serviceFactory: () async => throw StateError('must not analyze chunks'),
+    );
+
+    expect(
+      await coordinator.retryFailedItem(
+        chunkId: null,
+        reportDate: '2026-07-10',
+      ),
+      isTrue,
+    );
+    await generator.firstEntered.future.timeout(const Duration(seconds: 2));
+    expect(
+      await coordinator.retryFailedItem(
+        chunkId: null,
+        reportDate: '2026-07-11',
+      ),
+      isTrue,
+    );
+
+    var stopped = false;
+    final stopping = coordinator.stop().then((_) => stopped = true);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(stopped, isFalse);
+    generator.release();
+    await stopping;
+
+    expect(repository.jobs['2026-07-10']?.status, DailyReportJobStatus.pending);
+    expect(repository.jobs['2026-07-11']?.status, DailyReportJobStatus.pending);
+    expect(repository.completedDates, isEmpty);
+    expect(generator.runCounts['2026-07-10'], 1);
+    expect(generator.runCounts['2026-07-11'], isNull);
+  });
 }
 
 Future<void> _waitUntil(bool Function() condition) async {
@@ -760,6 +947,193 @@ final class _SchedulingRepository
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+final class _ReportSchedulingRepository
+    implements
+        CaptureRepository,
+        AnalysisRepository,
+        TimelineRepository,
+        DailyReportJobRepository {
+  _ReportSchedulingRepository(Map<String, DailyReportJobStatus> initialJobs) {
+    for (final entry in initialJobs.entries) {
+      jobs[entry.key] = _job(entry.key, entry.value);
+    }
+  }
+
+  final Map<String, DailyReportJob> jobs = <String, DailyReportJob>{};
+  final Map<String, int> claimCounts = <String, int>{};
+  final List<String> completedDates = <String>[];
+  final List<int> claimedChunkIds = <int>[];
+  int listChunksCalls = 0;
+  int? listChunksGateAfterCall;
+  Completer<void>? listChunksGate;
+  final Completer<void> listChunksGateEntered = Completer<void>();
+  Completer<void>? claimPendingGate;
+  final Completer<void> claimPendingGateEntered = Completer<void>();
+
+  @override
+  Future<List<CaptureChunk>> listChunks({
+    Set<ProcessingStatus>? statuses,
+    int? dueAtMs,
+    bool? evidencePurged,
+    int? afterId,
+    int limit = 100,
+  }) async {
+    listChunksCalls++;
+    final gateAfter = listChunksGateAfterCall;
+    final gate = listChunksGate;
+    if (gateAfter != null && listChunksCalls > gateAfter && gate != null) {
+      if (!listChunksGateEntered.isCompleted) listChunksGateEntered.complete();
+      await gate.future;
+    }
+    return const <CaptureChunk>[];
+  }
+
+  @override
+  Future<AnalysisBatch> claimChunksForAnalysis(List<int> chunkIds) async {
+    claimedChunkIds.addAll(chunkIds);
+    throw StateError('no chunks are available');
+  }
+
+  @override
+  Future<DailyReportJob?> claimNextDailyReportJob() async {
+    for (final entry in jobs.entries) {
+      if (entry.value.status != DailyReportJobStatus.pending) continue;
+      final claimed = _job(
+        entry.key,
+        DailyReportJobStatus.processing,
+        retryCount: entry.value.retryCount,
+      );
+      jobs[entry.key] = claimed;
+      claimCounts.update(entry.key, (count) => count + 1, ifAbsent: () => 1);
+      return claimed;
+    }
+    return null;
+  }
+
+  @override
+  Future<DailyReportJob?> claimPendingDailyReportJob(String reportDate) async {
+    final gate = claimPendingGate;
+    if (gate != null) {
+      if (!claimPendingGateEntered.isCompleted) {
+        claimPendingGateEntered.complete();
+      }
+      await gate.future;
+    }
+    final existing = jobs[reportDate];
+    if (existing?.status != DailyReportJobStatus.pending) return null;
+    final claimed = _job(
+      reportDate,
+      DailyReportJobStatus.processing,
+      retryCount: existing!.retryCount,
+    );
+    jobs[reportDate] = claimed;
+    claimCounts.update(reportDate, (count) => count + 1, ifAbsent: () => 1);
+    return claimed;
+  }
+
+  @override
+  Future<bool> retryFailedDailyReportJob(String reportDate) async {
+    final existing = jobs[reportDate];
+    if (existing?.status != DailyReportJobStatus.failed) return false;
+    jobs[reportDate] = _job(
+      reportDate,
+      DailyReportJobStatus.processing,
+      retryCount: existing!.retryCount,
+    );
+    claimCounts.update(reportDate, (count) => count + 1, ifAbsent: () => 1);
+    return true;
+  }
+
+  @override
+  Future<DailyReportJob?> getDailyReportJob(String reportDate) async =>
+      jobs[reportDate];
+
+  @override
+  Future<List<DailyReportJob>> listDailyReportJobs() async =>
+      jobs.values.toList(growable: false);
+
+  @override
+  Future<bool> completeDailyReportJob(String reportDate) async {
+    if (jobs[reportDate]?.status != DailyReportJobStatus.processing) {
+      return false;
+    }
+    jobs.remove(reportDate);
+    completedDates.add(reportDate);
+    return true;
+  }
+
+  @override
+  Future<bool> markDailyReportJobFailed(
+    String reportDate, {
+    required String category,
+    required String summary,
+  }) async {
+    final existing = jobs[reportDate];
+    if (existing?.status != DailyReportJobStatus.processing) return false;
+    jobs[reportDate] = _job(
+      reportDate,
+      DailyReportJobStatus.failed,
+      retryCount: existing!.retryCount + 1,
+    );
+    return true;
+  }
+
+  @override
+  Future<int> recoverInterruptedDailyReportJobs() async {
+    var recovered = 0;
+    for (final entry in jobs.entries.toList(growable: false)) {
+      if (entry.value.status != DailyReportJobStatus.processing) continue;
+      jobs[entry.key] = _job(
+        entry.key,
+        DailyReportJobStatus.pending,
+        retryCount: entry.value.retryCount,
+      );
+      recovered++;
+    }
+    return recovered;
+  }
+
+  static DailyReportJob _job(
+    String date,
+    DailyReportJobStatus status, {
+    int retryCount = 0,
+  }) => DailyReportJob(
+    reportDate: date,
+    status: status,
+    retryCount: retryCount,
+    requestedAtMs: 1,
+    updatedAtMs: 1,
+    processingStartedAtMs: status == DailyReportJobStatus.processing ? 1 : null,
+  );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+final class _GatedReportGenerator {
+  final Completer<void> firstEntered = Completer<void>();
+  final Completer<void> _release = Completer<void>();
+  final Map<String, int> runCounts = <String, int>{};
+  var _active = 0;
+  var maxActive = 0;
+
+  Future<void> call(String reportDate) async {
+    runCounts.update(reportDate, (count) => count + 1, ifAbsent: () => 1);
+    _active++;
+    if (_active > maxActive) maxActive = _active;
+    if (!firstEntered.isCompleted) firstEntered.complete();
+    try {
+      await _release.future;
+    } finally {
+      _active--;
+    }
+  }
+
+  void release() {
+    if (!_release.isCompleted) _release.complete();
+  }
 }
 
 final class _EmptyEvidenceReader extends ChunkEvidenceReader {
