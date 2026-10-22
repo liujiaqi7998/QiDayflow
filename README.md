@@ -6,7 +6,7 @@ Qi Day Flow 是一个 Windows 本地优先的屏幕活动时间流。它以低�
 
 本项目源于：https://github.com/JerryZLiu/Dayflow.git 和 https://github.com/SeiShonagon520/Dayflow.git
 
-之所以取名 QiDayflow 是为了搜索引擎区分
+之所以取名 QiDayflow 是为了搜索引擎区分。
 
 **如果你喜欢，请不要忘记去原作者仓库Start**
 
